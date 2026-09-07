@@ -1,5 +1,18 @@
 # Bot de Trading Automático — Binance Futures
 
+## Trading Agent v0.2 — Phase 1
+
+See [the Phase 1 operating contract and SDK compatibility findings](docs/phase1.md).
+Only offline regression tests and documentation have been added; the application
+still has the original baseline behavior. v0.2 is **Testnet only**; the original
+live-trading instructions below are not part of its approved operating contract.
+
+Run the strategy tests without credentials or Binance connections:
+
+```bash
+python -B -m unittest discover -s tests -v
+```
+
 Bot en Python que opera automáticamente en el mercado de futuros de Binance,
 usando una estrategia de cruce de medias móviles (EMA) como punto de partida.
 
