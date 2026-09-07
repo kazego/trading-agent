@@ -1,5 +1,13 @@
 # Bot de Trading Automático — Binance Futures
 
+## Trading Agent v0.2 — Phase 2
+
+See [Phase 2 configuration, types, errors, and structured logging](docs/phase2.md).
+`TRADING_ENABLED=False` is **declarative only** at this phase; the legacy loop
+does not enforce it. Run the offline tests below, not the bot, to verify Phase 2.
+Strategy and risk calculations remain unchanged. No SQLite or execution engine
+has been added.
+
 ## Trading Agent v0.2 — Phase 1
 
 See [the Phase 1 operating contract and SDK compatibility findings](docs/phase1.md).

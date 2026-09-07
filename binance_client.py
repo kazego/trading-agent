@@ -3,6 +3,7 @@ Wrapper sobre python-binance para simplificar las operaciones de Futures
 que usa el bot: obtener velas, precio actual, mandar órdenes, cerrar posiciones, etc.
 """
 
+import logging
 import pandas as pd
 from binance.client import Client
 from binance.enums import (
@@ -11,6 +12,7 @@ from binance.enums import (
 )
 
 import config
+from logging_config import LOGGER_NAME
 
 
 class BinanceFuturesClient:
@@ -26,8 +28,11 @@ class BinanceFuturesClient:
         # Aseguramos el apalancamiento configurado para el símbolo
         try:
             self.client.futures_change_leverage(symbol=config.SYMBOL, leverage=config.LEVERAGE)
-        except Exception as e:
-            print(f"[WARN] No se pudo fijar el apalancamiento: {e}")
+        except Exception:
+            logging.getLogger(LOGGER_NAME).warning(
+                "No se pudo fijar el apalancamiento", exc_info=True,
+                extra={"event_type": "leverage_error", "symbol": config.SYMBOL},
+            )
 
     def get_klines(self, limit: int = 100) -> pd.DataFrame:
         """Trae las últimas velas del símbolo/timeframe configurado."""

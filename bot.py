@@ -19,8 +19,8 @@ IMPORTANTE:
 """
 
 import time
-import traceback
-from datetime import datetime
+import logging
+from uuid import uuid4
 
 from binance.enums import SIDE_BUY, SIDE_SELL
 
@@ -28,19 +28,39 @@ import config
 import strategy
 import risk_manager
 from binance_client import BinanceFuturesClient
+from logging_config import LOGGER_NAME, configure_logging
+from errors import ApplicationError
+
+
+logger = logging.getLogger(LOGGER_NAME)
 
 
 def log(msg: str):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}")
+    severity = logging.INFO
+    if "[ERROR CRÍTICO]" in msg or "[ERROR GRAVE]" in msg:
+        severity = logging.CRITICAL
+    elif "[ERROR]" in msg:
+        severity = logging.ERROR
+    elif "[WARN]" in msg or "[ALERTA]" in msg:
+        severity = logging.WARNING
+    logger.log(severity, msg, extra={"event_type": "legacy_bot", "symbol": config.SYMBOL})
 
 
 def run_bot():
-    client = BinanceFuturesClient()
+    settings = config.load_settings()  # Must precede any Binance construction.
+    configure_logging(settings.LOG_DIRECTORY, secrets=(config.API_KEY, config.API_SECRET), run_id=str(uuid4()))
+    logger.info("Configuration validated; Phase 2 limits are declarative",
+                extra={"event_type": "startup", "symbol": config.SYMBOL})
+    logger.warning("TRADING_ENABLED is declarative and is not enforced by the legacy loop",
+                   extra={"event_type": "phase2_scope"})
+    try:
+        client = BinanceFuturesClient()
+        qty_precision, price_precision = client.get_symbol_precision()
+    except Exception:
+        logger.exception("Client initialization failed", extra={"event_type": "startup_error"})
+        raise ApplicationError("Client initialization failed; see sanitized logs") from None
     log(f"Bot iniciado | Símbolo: {config.SYMBOL} | Timeframe: {config.TIMEFRAME} "
         f"| Testnet: {config.USE_TESTNET}")
-
-    qty_precision, price_precision = client.get_symbol_precision()
 
     while True:
         try:
@@ -115,11 +135,11 @@ def run_bot():
             time.sleep(config.POLL_INTERVAL_SECONDS)
 
         except KeyboardInterrupt:
-            log("Bot detenido manualmente por el usuario.")
+            logger.info("Bot detenido manualmente por el usuario.", extra={"event_type": "shutdown"})
             break
         except Exception as e:
             log(f"[ERROR] {e}")
-            traceback.print_exc()
+            logger.exception("Main loop error", extra={"event_type": "api_error", "symbol": config.SYMBOL})
             time.sleep(config.POLL_INTERVAL_SECONDS)
 
 
