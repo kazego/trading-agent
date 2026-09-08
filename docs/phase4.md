@@ -203,3 +203,103 @@ operation remain outside Phase 4B. No commit is made and Phase 5 is not started.
 Verification result: 139 tests passed (the existing 98 plus 41 new adapter tests),
 in 1.205 seconds on the final behavioral test run. Command:
 `python -B -m unittest discover -s tests -v`.
+
+## Phase 4C: explicit read-only contract utility
+
+Entry point: `demo_contract.py`. It never calls `bot.py`. Importing it does not
+construct an adapter, inspect credentials, or make network calls. It is outside
+pytest's test-file naming convention and additionally refuses execution when pytest
+is loaded or PYTEST_CURRENT_TEST is present. Its offline tests use fake SDK responses.
+
+The operator must provide these environment variables in the invoking process:
+
+- `BINANCE_DEMO_API_KEY`
+- `BINANCE_DEMO_API_SECRET`
+
+These must be Futures Demo credentials. The utility never falls back to legacy
+BINANCE_API_KEY/BINANCE_API_SECRET variables. Credential provenance cannot be proven
+from the strings alone; the Demo server must authenticate them. Do not paste actual
+credentials into command arguments, source files, reports, or chat.
+
+With those variables already securely configured, explicitly invoke from the project
+root using a Python environment with the existing pinned requirements installed:
+
+```text
+python -B demo_contract.py --live-read-only
+```
+
+No arguments (or any different arguments) refuses live execution. There is no host
+argument, production option, automatic startup integration, dependency installer,
+or background task. The installed python-binance distribution version must be
+exactly 1.0.37. Missing SDK/dependencies/credentials prevent initialization.
+
+The utility constructs only the Phase 4B adapter, passes the Demo credentials
+explicitly, and invokes its existing environment guard before any read. The adapter
+continues to require demo=True/testnet=False, ping=False, the exact approved Futures
+Demo URL for all three versions, bounded timeout, and no redirects. Wrong/legacy/
+production endpoints are refused. No SDK reads are called directly by the utility.
+
+The check sequence covers server time, exchange info and each watchlist symbol's
+filters, account, balances, One-Way mode, positions, both open-order families, and a
+bounded recent-fill page for each symbol (limit 100). For each nonempty order family,
+one representative existing order is queried twice: by exchange ID and by client ID.
+Both returned identities and symbol must still match. Empty families produce SKIPPED
+lookup checks. No record is created to populate the test, and no position is resolved.
+
+All successful reads already pass through Phase 4B normalization. The utility also
+checks the exact returned model types recursively, including tuple members, optional
+fields, and finite Decimal financial fields. Position inconsistency markers, hedge
+mode/rows, or orders outside the dedicated watchlist stop the run. This is contract
+validation, not reconciliation or permission to trade.
+
+Output uses PASS / FAIL / SKIPPED per check:
+
+- Overall PASS (exit 0): every required read and both families' sampled lookups passed.
+- Overall PARTIAL (exit 2): lookups could not be exercised because no orders existed,
+  a transient timeout/read/rate-limit failure stopped the run, or invocation lacked
+  the exact opt-in flag. Transient failures are labeled separately and never retried.
+- Overall FAIL (exit 1): configuration, SDK availability/version, credentials,
+  account mode, normalization, identity, or unknown-state failure.
+
+Every failed check stops further reads, even for transient failures. Remaining checks
+are marked SKIPPED. Unknown exception messages/class names are never printed.
+The report contains the validated host, pinned version, public server time, check
+results, and small aggregate row/optional-field counts. It excludes balances,
+position sizes/prices, client IDs, exchange IDs, raw authenticated payloads, and
+credentials. Exact credential values are also redacted from final text as defense
+in depth. No files or database records are written by the utility.
+
+Raw field-by-field comparison is explicitly reported SKIPPED: the adapter discards
+extra raw fields and this utility does not intercept its transport. Optional-field
+counts and inferred-flat row counts describe observable normalized shape variations.
+Successful normalization is not a claim that live payloads exactly match the mocks.
+This supplemental raw comparison does not prevent an overall PASS of the defined
+normalized read contract. An incompatible response shape fails normalization and
+stops the run, without dumping the payload.
+
+A PASS does not prove complete historical fills, SL/TP validity, safe execution,
+restart safety, fresh atomic account state, or future availability. Lookup visibility
+may race order lifecycle/history expiry; such a failure stops rather than creating
+or retrying anything. API access and the previously reported Futures web 404 remain
+unverified until the operator explicitly performs the live run. `bot.py` remains
+incompatible and MUST NOT be used. No Phase 5 work is included.
+
+### Phase 4C closure: live validation blocked for this operator
+
+The read-only contract utility is implemented and covered by offline/mock tests.
+Live authenticated validation was NOT performed. The operator reported that the
+Futures web UI's More -> Demo Trading link redirects to a
+`demo.binance.com/.../futures` page returning a Binance 404. The mobile app's Futures
+section also did not expose an accessible Demo Trading entry for this account.
+Consequently, Futures Demo credentials could not be created or obtained.
+
+This records an access blocker for this operator/account/environment only. It does
+not establish that Binance Futures Demo is globally discontinued or that the API
+itself is unavailable. Offline/mock results do not prove live API compatibility.
+
+Deferred requirement: once this operator can access Futures Demo and obtain its
+credentials, explicitly invoke the read-only utility to validate authenticated
+reads and available existing-order lookups against the approved Demo endpoint.
+Production credentials or endpoints MUST NOT be used as substitutes. `bot.py`
+remains incompatible and MUST NOT be run. Closing the implementation phase does
+not close or waive this deferred live-validation requirement.
