@@ -62,6 +62,18 @@ class PersistenceUnavailableError(CriticalError):
     pass
 
 
+class SchemaMismatchError(PersistenceUnavailableError):
+    pass
+
+
+class PersistenceConflictError(CriticalError):
+    """A uniqueness, stale-update, or local-state constraint was violated."""
+
+
+class RuntimeOwnershipError(CriticalError):
+    """Another process/store already owns this local database."""
+
+
 class ProtectionFailureError(CriticalError):
     pass
 

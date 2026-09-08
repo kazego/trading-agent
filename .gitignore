@@ -36,3 +36,8 @@ logs/
 *.sqlite3-journal
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Local database ownership locks (retained after orderly shutdown)
+*.db.lock
+*.sqlite.lock
+*.sqlite3.lock

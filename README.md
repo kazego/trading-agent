@@ -1,12 +1,20 @@
 # Bot de Trading Automático — Binance Futures
 
+## Trading Agent v0.2 — Phase 3
+
+See [Phase 3 local persistence and runtime state](docs/phase3.md) for the schema,
+API, transaction rules, and recovery boundaries. SQLite storage is available as
+an independent component; the legacy bot does not use it yet. Strategy, risk
+sizing, and order behavior remain unchanged. `TRADING_ENABLED=False` remains
+declarative in the legacy loop. No exchange reconciliation is implemented.
+
 ## Trading Agent v0.2 — Phase 2
 
 See [Phase 2 configuration, types, errors, and structured logging](docs/phase2.md).
 `TRADING_ENABLED=False` is **declarative only** at this phase; the legacy loop
 does not enforce it. Run the offline tests below, not the bot, to verify Phase 2.
-Strategy and risk calculations remain unchanged. No SQLite or execution engine
-has been added.
+Strategy and risk calculations remained unchanged in Phase 2. SQLite was added
+separately in Phase 3; an execution engine remains unimplemented.
 
 ## Trading Agent v0.2 — Phase 1
 
