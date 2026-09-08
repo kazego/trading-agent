@@ -1,5 +1,12 @@
 # Bot de Trading Automático — Binance Futures
 
+## Trading Agent v0.2 — Phase 4B
+
+See [the read-only Futures Demo adapter](docs/phase4.md). The adapter now exposes
+normalized reads only; the original `bot.py` is not compatible with this API and
+must not be used as a trading entry point. No execution integration or live API
+verification has been performed. Run the offline test suite below for validation.
+
 ## Trading Agent v0.2 — Phase 3
 
 See [Phase 3 local persistence and runtime state](docs/phase3.md) for the schema,
