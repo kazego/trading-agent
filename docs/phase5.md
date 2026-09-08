@@ -435,3 +435,168 @@ reconstructable portfolio records and fingerprints, not performance analysis.
 No historical downloader, optimization, Strategy Lab, live execution, Binance
 calls or bot trading entry point is added. Existing Phase 1/5B/5C/5D code/tests
 remain unchanged; full-suite legacy startup tests still use their fake client.
+
+## Phase 5F: deterministic analytics and reports
+
+`backtest/metrics.py` consumes completed Phase 5E portfolio records and their
+matching source datasets. `backtest/report.py` creates canonical JSON and concise
+text. Neither module executes strategy decisions, changes fills, performs
+simulation, downloads data, or writes files automatically. Phase 5B-5E code and
+behavior are unchanged. Source dataset fingerprints must match the portfolio
+result; lifecycle/equity consistency is checked before analytics are returned.
+
+### Trade metrics
+
+Starting/final equity are the recorded portfolio realized balances. Absolute
+return is final minus initial; return percent is that difference / initial * 100.
+Gross and net P&L sum the recorded trade fields. Total fees sum actual entry and
+exit fees once. No additional cost is charged by analytics.
+
+Win/loss/breakeven classify NET trade P&L as positive/negative/zero. Win rate is
+wins / all closed trades * 100, including breakevens in the denominator. Average
+net trade and expectancy both equal total net P&L / trade count. Best/worst trade
+are maximum/minimum net P&L. Average winner uses positive net outcomes; average
+loser is the positive magnitude of the average negative net outcome. Realized
+win/loss ratio divides those two averages. Breakevens reset both streaks.
+
+Profit factor follows the Phase 5F gross-P&L definition:
+
+```text
+gross_realized_profits = sum(positive trade.gross_pnl)
+gross_realized_losses = abs(sum(negative trade.gross_pnl))
+profit_factor = gross_realized_profits / gross_realized_losses
+```
+
+Gross P&L includes modeled fill slippage but excludes fees. This ratio can differ
+from a NET-P&L profit factor: a gross-positive trade may be a net loser after fees.
+The report deliberately labels the ratio as gross profit factor, while wins and
+expectancy use net results. No alternate fee adjustment is silently applied.
+
+Ratios use an explicit `{value, status}` structure. Profit factor is numeric
+DEFINED when gross losses exist (including zero when gross profits are absent).
+Otherwise value is null, with NO_TRADES, NO_GROSS_LOSSES (profits exist), or
+NO_GROSS_PROFITS_OR_LOSSES (all gross outcomes zero). Win/loss ratio is null when
+either side is absent, with NO_TRADES, NO_WINNERS or NO_LOSERS. It is not infinity.
+With zero trades, counts/P&L/fees/return are zero; win rate, averages, expectancy,
+best/worst and ratio values are null. Undefined values display N/A. No NaN or
+infinity is emitted. Financial/ratio arithmetic uses the existing fixed
+precision-50 Decimal policy; JSON financial values are canonical decimal strings.
+
+### Realized versus candle-close MTM equity
+
+The realized curve starts at initial equity and adds a point only when a trade
+closes. Each point identifies its boundary and responsible entry decision ID.
+An opening exit has an exact opening timestamp. For INTRABAR exits, the curve
+records the candle-close observation timestamp, retaining the original exit
+phase: this is not a fabricated intrabar fill time. END_OF_DATA uses the final
+candle-close observation. The initial point is explicitly labeled INITIAL.
+
+The MTM curve starts at initial equity, then samples every PROCESSED portfolio
+boundary at its completed close (`open_time_ms + 899999`), using that symbol's
+source close only in this post-run analytics pass:
+
+```text
+unrealized_LONG  = (mark_close - entry_fill) * quantity
+unrealized_SHORT = (entry_fill - mark_close) * quantity
+MTM = realized_closed_trade_balance + unrealized_P&L
+```
+
+A closed position has zero unrealized P&L, so its point includes actual net P&L
+and both actual fees in realized balance. An open position uses price-only P&L:
+hypothetical exit fees are excluded. Under this specified formula its entry fee
+also remains deferred until closure, because Phase 5E realized balance does not
+debit that fee separately. This is an explicitly defined analytics series, not
+available cash or estimated liquidation value. No MTM value feeds back into
+sizing, signal evaluation, arbitration, or execution. Insolvent runs are sampled
+only through their final processed boundary, not extended to the requested end.
+
+### Drawdown and duration
+
+The PRIMARY risk measure is MTM candle-close drawdown. REALIZED drawdown is also
+reported and clearly labeled separately. Both include initial equity as a
+high-water reference. Drawdown amounts and percentages are positive loss
+magnitudes: peak minus equity, and that difference / peak * 100. Negative terminal
+equity is preserved; drawdown can exceed 100% in this model without liquidation.
+
+An episode begins at the latest recorded high-water point preceding a decline.
+A return to or above that peak is recovery, including equality. Repeated equal
+troughs retain the first timestamp. Maximum amount and maximum percentage can
+belong to different episodes: the report retains BOTH corresponding peak,
+trough and recovery records rather than incorrectly combining them.
+
+Each episode records peak/trough values and timestamps, recovery timestamp or
+null, completed duration or null, observed duration and unrecovered status.
+Completed duration is recovery timestamp minus peak timestamp; maximum completed
+duration excludes unfinished episodes and is zero if none recovered. Unrecovered
+episodes remain explicitly unrecovered, with observed duration through the final
+processed candle close (also for a realized curve whose last closure was earlier).
+With no decline, max drawdown is zero and episode references are null.
+
+MTM is sampled at 15m candle closes. Maximum MTM drawdown therefore does NOT
+necessarily represent the worst intrabar equity excursion. Duration timestamps
+use these observation conventions; they do not claim intrabar precision.
+
+### Attribution and operations
+
+BTCUSDT, ETHUSDT and ADAUSDT each receive the same trade statistics plus actionable
+signals and accepted trades. Operational counts include all evaluations, LONG,
+SHORT, NONE, accepted entries, BLOCKED_OPEN_POSITION, BLOCKED_PRIORITY, eligibility
+rejections, STOP_LOSS/TAKE_PROFIT/END_OF_DATA and dual-touch exits. Both total and
+per-symbol counts are available. NONE is not actionable. Trades are attributed
+to their entry symbol. Counts, P&L and fees reconcile by summation; ratios,
+averages and streaks must not be summed or naively averaged. Per-symbol return
+percent is not invented for the shared capital pool.
+
+### Manifest, machine output and text
+
+`build_report(result, datasets, code_revision=None)` produces a BacktestReport.
+The manifest records the portfolio fingerprint, source dataset provenance/hashes,
+symbols/priority, timeframe, requested interval, final processed boundary, warmup
+policy, captured strategy source hash/version/EMA spans, config, effective cost
+rates, risk/leverage/SL/TP percentages, max concurrent positions=1, explicit rule
+assumptions, captured Python/pandas/NumPy versions and data/adapter/execution/
+portfolio/metrics/report versions. The analytics and report source files are
+hashed at report generation, with normalized newlines. No wall-clock metadata is
+added. Optional code_revision is explicitly OPERATOR_SUPPLIED; when omitted it
+is UNAVAILABLE. The report does not guess the original Git revision from a later
+checkout or claim an independently verified execution revision.
+
+Canonical JSON contains manifest, summary, risk metrics, per-symbol metrics,
+operations, both curves, full trade records with stable decision-ID references,
+and assumptions. The manifest hash excludes its own fingerprint field. The
+report hash covers the entire document including manifest hash, excluding only
+its own report_fingerprint. Identical records, datasets, provenance and reporting
+code produce byte-identical JSON with one final newline. Relevant configuration,
+source or result changes produce different fingerprints. This supports later
+comparison without implementing search, optimization or Strategy Lab.
+
+```python
+from backtest.report import build_report
+
+report = build_report(result, datasets)  # existing Phase 5E result and source map
+text = report.text()                    # concise display; no automatic print
+# print(text)                           # explicit operator choice
+# report.write("backtest-report.json")  # explicit NEW file creation only
+```
+
+`write` requires .json and exclusive creation; an existing destination is never
+silently overwritten. No directories are created automatically. JSON retains
+canonical precision; human text rounds display values to four fractional places
+and shows modeled fees/slippage, gross versus net results, PRIMARY MTM and REALIZED
+drawdown, symbol attribution and fingerprint. All reports state that funding
+and liquidation are excluded and results are not complete Futures account returns.
+
+### Validation and remaining work
+
+Synthetic manual tests cover metric arithmetic and edge cases, LONG/SHORT marks,
+realized/MTM distinctions, peak/trough/recovery/tie rules, completed/unrecovered
+duration, attribution reconciliation, operational and exit counts, canonical
+hash verification, exclusive writing and byte-identical replay. Tests also prove
+reports never invoke strategy evaluation and leave source datasets, decisions,
+fills, equity progression and portfolio fingerprints unchanged.
+
+Phase 5G remains unimplemented: separately authorized historical-data acquisition
+and a bounded reference study. No historical data has been downloaded for 5F.
+There is no Binance interaction, bot trading entry point, parameter optimization
+or change to strategy/execution/portfolio rules. The full existing offline suite
+continues to include its legacy startup tests under a fake client only.
