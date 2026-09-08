@@ -322,3 +322,116 @@ Phase 5E remains unimplemented: shared equity and one position TOTAL across the
 three symbols, synchronized portfolio scheduling and approved BTC/ETH/ADA signal
 priority. No simultaneous-signal arbitration, aggregate metrics, Strategy Lab,
 downloader or live execution is introduced here.
+
+## Phase 5E: synchronized portfolio scheduling
+
+`backtest/portfolio.py` adds `simulate_portfolio(datasets, rules, config)`.
+Inputs are mappings with exactly BTCUSDT, ETHUSDT and ADAUSDT keys. Each value
+is a validated in-memory Dataset or that symbol's explicit SymbolRules. The
+scheduler uses a fixed BTCUSDT -> ETHUSDT -> ADAUSDT tuple; caller mapping
+insertion order never determines evaluation, arbitration or result order.
+
+All datasets must cover the same nonempty half-open evaluation interval and 15m
+timeframe. Each Phase 5C clock requires at least 99 completed warmup candles and
+complete contiguous coverage. Missing/extra symbols, wrong rule ownership,
+misaligned intervals, insufficient warmup or missing candles fail before any
+strategy evaluation. No forward-filling or interpolation is performed. Different
+warmup counts are allowed if each meets the clock's requirement; the strategy
+still receives exactly 99 completed candles plus its synthetic forming row.
+
+### Boundary chronology and arbitration
+
+At every shared opening timestamp:
+
+1. Advance all three clocks together and verify equal opening times.
+2. Obtain all three frozen-strategy decisions, before accessing current intrabar
+   OHLC. Preserve all raw decisions, including NONE and blocked signals.
+3. Process an existing position's candle through unchanged Phase 5D execution.
+4. Determine eligibility from whether a position WAS HELD AT THE OPEN, not from
+   the position state after learning the candle's exit outcome.
+5. If eligible, consider actionable signals in fixed BTC/ETH/ADA order. Attempt
+   sizing/entry through Phase 5D. A sizing failure is REJECTED with its reason;
+   the next actionable symbol can be considered. The first tradeable signal wins.
+   Once accepted, every lower-priority actionable signal is BLOCKED_PRIORITY.
+6. Process the accepted position's entry candle using Phase 5D protections.
+   Even if it closes immediately, arbitration does not repeat in this candle.
+
+This uses a single position slot across the whole portfolio. When held at the
+open, every actionable signal is BLOCKED_OPEN_POSITION, including the held
+symbol's own signal. This remains true for opening-gap exits, intrabar exits and
+an exit causing insolvency. NONE is recorded as a non-actionable NONE disposition,
+not labeled as blocked. Earliest possible re-entry is the next valid opening
+boundary. No current candle's exit can retroactively enable an opening entry.
+
+Only signals and each candidate's current opening price/rules/equity participate
+in arbitration. Current high/low/close/volume and later outcomes never choose a
+winner. Full candles stay within simulation; Phase 5C event/frame construction
+is unchanged. Existing Phase 5D entry, protection, gap, dual-touch, cost, rounding,
+quantity and P&L functions are reused without modification.
+
+### Shared realized equity
+
+Portfolio equity starts at config.starting_equity (baseline 1,000 USDT). For
+each closure, exactly once:
+
+```text
+equity_after = equity_before + closed_trade.net_pnl
+```
+
+The next accepted trade receives this updated equity for Phase 5D sizing (baseline
+1% risk, maximum 3x leverage). Portfolio records use a CLOSED-TRADE realized
+balance: while a position is held, they do not subtract its entry fee separately
+or mark unrealized P&L. Entry fees are already reserved by Phase 5D's margin sizing
+and included in closed net P&L; deducting them again would double-count them.
+Thus this balance is not available cash or a mark-to-market account-equity series.
+Phase 5D's standalone cash-debit timing is unchanged; closed results agree.
+
+Nonpositive equity after closure records INSOLVENT and ends replay without future
+entries. Losses are preserved without clipping. Signals from that final boundary
+remain recorded and blocked by its opening position. This is deterministic
+insolvency handling, not liquidation modeling.
+
+At the last evaluation candle, a remaining position closes through the existing
+Phase 5D END_OF_DATA function using its own symbol's completed close and exit
+costs. Its net result updates portfolio equity once. Earlier SL/TP closure takes
+precedence. Terminal state is COMPLETED or INSOLVENT, with no position remaining.
+
+### Records and fingerprints
+
+Immutable BoundaryRecord values contain opening timestamp, equity before,
+three DecisionRecords in priority order, winner if any, the created Position,
+the closed ClosedTrade, equity after, position symbol before/after and state
+after (OPEN/FLAT/INSOLVENT). Each DecisionRecord retains the exact Phase 5C
+Decision, disposition (NONE/ACCEPTED/REJECTED/BLOCKED) and reason where applicable.
+The winner is the accepted candidate, not a higher-priority rejected candidate.
+These records reconstruct entries, closures, blocked signals and equity changes
+without live database identifiers. Equity before applies to all three opening
+decisions; an intrabar closure's equity after is never reused at that same open.
+
+PortfolioResult retains the config, symbol rules and dataset fingerprints in
+fixed order, boundary records, final equity, terminal state and portfolio/execution
+versions. Its fingerprint hashes canonical contents, including Decimal values
+as canonical strings. No random IDs, wall-clock time or container insertion order
+affects it. As accepted previously, future dataset edits may change provenance
+and whole-run fingerprints without changing earlier strategy-visible decisions.
+Results continue to state that funding and liquidation are excluded and that
+these are not complete Futures account returns.
+
+### Validation and next scope
+
+Synthetic tests cover BTC/ETH/ADA arbitration, all mapping permutations, open
+position blocking, intrabar/gap exit boundaries, entry-candle exit without a
+second entry, sizing after wins/losses, insolvency, alignment/gap/warmup failures,
+EOD accounting, rejected candidates, per-symbol prices/rules, one-position
+lifecycle reconstruction, immutable source data and deterministic replay.
+Look-ahead tests compare actual Phase 5C decisions, verify all three evaluations
+precede intrabar processing, and show changed outcomes cannot change earlier
+visible signals or opening arbitration. Scripted signals in selected scheduling
+tests are test-only; production always uses the frozen strategy adapter.
+
+Phase 5F remains unimplemented: aggregate metrics and reporting (including
+profit factor, drawdown and any equity-curve conventions). This phase adds only
+reconstructable portfolio records and fingerprints, not performance analysis.
+No historical downloader, optimization, Strategy Lab, live execution, Binance
+calls or bot trading entry point is added. Existing Phase 1/5B/5C/5D code/tests
+remain unchanged; full-suite legacy startup tests still use their fake client.
