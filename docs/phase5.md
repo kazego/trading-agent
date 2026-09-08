@@ -196,3 +196,129 @@ modules/tests never import it or connect to Binance.
 Phase 5D remains unimplemented: entries/fills, positions, protection processing,
 sizing, leverage, fees and slippage. Portfolio scheduling, metrics, downloads and
 live execution are also absent. `bot.py` must not be used as a trading entry point.
+
+## Phase 5D: single-symbol simulated execution
+
+`backtest/simulation.py` adds pure Decimal execution policies and
+`simulate(dataset, symbol, rules, config)`. This runs one selected symbol with
+at most one held position. There is no multi-symbol selection or portfolio
+arbitration. It consumes the same validated dataset and Phase 5C clock/adapter.
+No live persistence, Binance adapter, credentials or bot trading entry point is
+used. No historical data is downloaded. The examples and tests use synthetic data.
+
+### Models and inputs
+
+Frozen dataclasses describe SimulationConfig, SymbolRules, Fill, Position,
+ClosedTrade, Rejection and SimulationResult. Fill prices, quantity, fees, equity,
+thresholds and P&L use Decimal. Financial input floats are rejected. Arithmetic
+uses a fresh precision-50 Decimal context (ROUND_HALF_EVEN for ordinary arithmetic)
+so caller context cannot change results. Grid rounding is explicitly directional.
+
+Default starting equity is 1,000 USDT, risk fraction 0.01 and leverage 3. Equity
+must be positive, risk fraction must be in (0,1], and leverage in (0,3]. Changing
+risk/leverage is an explicit experiment input, never a Phase 2 live setting.
+The baseline SL/TP fractions remain fixed at 0.015/0.03. The result retains the
+entire immutable config and explicit symbol rules, plus a simulation version.
+
+SymbolRules require symbol, nonempty rule version/assumption label, positive
+tick/quantity step/minimum quantity, maximum quantity >= minimum, and optionally
+a nonnegative minimum notional. Rules are supplied locally; the simulator makes
+no claim that they are historically accurate exchange filters. Quantity uses a
+zero-origin lot grid (multiples of step), then min/max bounds. No automatic
+symbol rules, provisional live caps or leverage changes exist.
+
+### Decision and entry boundary
+
+For each opening event the adapter first computes a decision. If flat at the
+boundary and LONG/SHORT, sizing and an opening fill follow, using ONLY the event's
+opening price. NONE produces no entry. A position already held at the boundary
+prevents a new entry there, including when that position subsequently closes on
+an opening gap. There is no re-entry within a candle. Signals are still evaluated
+and retained while a position is held; no order intent is generated.
+
+Only after decision/entry does `process_bar` access the current candle's full
+OHLC. It is never supplied to the strategy adapter. Thus changing subsequent
+market behavior can change a trade outcome without changing its opening signal
+or visible-window fingerprint. Whole-dataset provenance IDs can still change,
+as accepted in Phase 5C.
+
+### Costs, thresholds and sizing
+
+CostMode explicitly selects GROSS (fees/slippage disabled), FEES_ONLY (configured
+entry/exit fees, no slippage), or FEES_AND_SLIPPAGE (both fees and adverse bps).
+Fee defaults are zero; operators must supply their documented assumptions for
+nonzero-cost studies. No rate is represented as Binance's current account rate.
+Inactive cost parameters remain in config but do not affect fills.
+
+With s = slippage_bps / 10,000, BUY fills use reference*(1+s), SELL fills use
+reference*(1-s). Require 0 <= bps < 10,000. This applies to entries, SL, TP and
+end-of-data exits. Fill prices retain their Decimal modeled value; there is no
+additional tick rounding of slipped fill prices. Fees are fill price*quantity*rate,
+with rates in [0,1). No fee rounding or fee-asset conversion is assumed.
+
+Let P be the actual slipped entry fill. LONG stop/target are P*0.985/P*1.03;
+SHORT stop/target are P*1.015/P*0.97. Round thresholds AWAY from entry: LONG stop
+down and target up; SHORT stop up and target down. Reject nonpositive or invalid
+thresholds after rounding.
+
+Let S be the rounded stop, Sfill its adverse exit fill, E current equity, r risk
+fraction, L leverage, and fe/fx effective entry/exit fee rates:
+
+```text
+loss_per_unit = abs(P - Sfill) + P*fe + Sfill*fx
+risk_quantity = E*r / loss_per_unit
+margin_quantity = E / (P/L + P*fe)
+quantity = floor_to_step(min(risk_quantity, margin_quantity, max_quantity))
+planned_stop_risk = quantity * loss_per_unit
+```
+
+Reject zero, below-minimum quantity or below-minimum notional explicitly as a
+Rejection linked to its decision. No automatic bump to a minimum is allowed.
+The margin cap reserves the entry fee as well as initial margin. Invalid config,
+rules, identities or malformed state fail the run; only untradeable sizing is a
+recorded rejection. Gap losses may exceed planned risk. Example: E=1,000, r=1%,
+P=100, S=98.5, no costs, step=.001 and loose caps yield quantity=6.666 and planned
+stop risk=9.999.
+
+### Protection and closing
+
+Protections apply immediately, including the entry candle. Threshold equality
+triggers. Opening conditions are considered first: adverse opening beyond SL
+uses that worse open; favorable opening beyond TP uses the target with no price
+improvement. Then apply adverse exit slippage. Opening precedence also applies
+when a very heavily slipped entry leaves the opening quote already beyond its
+new stop: the immediate stop uses the adverse quote, not a better stop reference.
+
+If the open does not determine an exit, LONG checks low<=SL/high>=TP and SHORT
+checks high>=SL/low<=TP. If both touch, STOP_LOSS wins and `dual_touch=True`.
+Opening-resolved exits are not marked ambiguous, even if the full range touches
+both levels. OHLC cannot establish exact intrabar execution timestamps: fills
+record candle open time and phase OPEN/INTRABAR/CLOSE, without inventing a time.
+
+Any position remaining after the final completed candle exits at its close with
+configured exit costs and reason END_OF_DATA. SL/TP already triggered on that
+candle takes precedence. Gross P&L is (exit-entry)*quantity for LONG and its
+negative for SHORT. Net subtracts entry and exit fees. Entry fees debit equity
+once at entry; exit adds gross less exit fee. Closed equity therefore equals
+starting equity plus closed net results. Equity <= 0 after an exit stops replay,
+marks insolvency and preserves the actual negative balance; losses are not clipped.
+
+Results contain trades, decisions, rejections and ending equity, without aggregate
+performance metrics. They explicitly state: **Net after modeled trading costs
+only; funding and liquidation excluded. Not complete Futures account returns.**
+This is an OHLC simulation, not a liquidation/margin-call or exchange queue model.
+
+### Tests and next boundary
+
+Offline manual checks cover mirrored LONG/SHORT stop and target P&L, exact touches,
+dual-touch, stop/target gaps, adverse fills on all exits, the 2.8985 fee example,
+6.666 sizing, cost-inclusive stop risk, fee-reserved margin, lot/min/max/notional
+rules, invalid inputs, entry-candle exits, no re-entry, END_OF_DATA, insolvency,
+deterministic replay across Decimal contexts and post-decision outcome changes.
+Existing Phase 1/5B/5C tests remain unchanged. As before, existing full-suite
+startup tests run only under their fake client, not as a bot trading entry point.
+
+Phase 5E remains unimplemented: shared equity and one position TOTAL across the
+three symbols, synchronized portfolio scheduling and approved BTC/ETH/ADA signal
+priority. No simultaneous-signal arbitration, aggregate metrics, Strategy Lab,
+downloader or live execution is introduced here.
