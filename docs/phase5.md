@@ -119,3 +119,80 @@ invoke the actual bot. `bot.py` remains incompatible and must not be run.
 Live Demo contract validation is still deferred for this operator. No Phase 5C
 simulation clock, strategy invocation, order execution, metrics or live state
 integration is included.
+
+## Phase 5C: historical clock and frozen strategy adapter
+
+Phase 5B canonical JSON storage and the lack of artifact reload are approved
+baseline decisions. Phase 5C consumes validated in-memory datasets directly.
+
+`HistoricalClock(dataset, symbol)` in `backtest/clock.py` iterates one symbol
+independently. It requires at least 99 requested warmup candles and verifies
+contiguous complete coverage. It emits only the evaluation interval's opens:
+`start_ms <= open_time_ms < end_ms`. Extra warmup is allowed, but every event
+contains exactly the latest 99 completed candles. Re-iteration restarts replay;
+there is no wall-clock dependency, cross-symbol priority or arbitration.
+
+Each immutable `OpeningEvent` exposes the symbol, timeframe, current open time,
+opening price, `completed_through_ms = open_time_ms - 1`, a tuple of 99 immutable
+completed candles and the dataset fingerprint. It does not expose the current
+bar's eventual high/low/close/volume, the next open, or a Dataset reference. The
+clock necessarily holds the historical source internally; the event interface
+is a look-ahead prevention boundary, not a Python security sandbox. Consumers
+must use events rather than access clock internals or the original dataset.
+
+`FrozenStrategyAdapter().evaluate(event)` in `backtest/strategy_adapter.py`
+constructs a fresh DataFrame and calls the existing `strategy.get_signal` once:
+
+- Rows 0..98 are completed candles i-99..i-1, oldest first.
+- Row 99 is synthetic forming candle i. Its OHLC equals its known opening price;
+  volume is zero. Its scheduled close timestamp is calendar information, not
+  a claim that this candle is complete.
+- Thus `-3` is i-2, `-2` is i-1, and `-1` is the synthetic forming row.
+- Historical financial values remain Decimal until conversion into explicit
+  pandas float64 columns. Overflow, non-finite values and nonzero values that
+  underflow to zero fail closed. Ordinary float64 rounding intentionally matches
+  the frozen pandas strategy; EMA arithmetic is not replaced with Decimal.
+- EMA configuration must remain 9/21. The adapter checks without changing config.
+  It never changes `strategy.py`, including its `ewm(adjust=False)`, equality,
+  LONG/SHORT/NONE or minimum-23-row behavior. The stricter clock refuses fewer
+  than 99 warmup candles instead of invoking that short-history branch.
+- There is no full-history EMA cache. Recomputing within each 100-row window is
+  required: a different EMA initialization history can change crossover signals.
+
+The immutable `Decision` records symbol/timeframe, opening decision time,
+completed boundary, signal, all 99 completed candle open-time references,
+dataset fingerprint and visible-window fingerprint. It also records strategy
+and adapter versions, newline-normalized strategy source SHA-256, EMA spans,
+pandas/NumPy/Python versions and a deterministic content-derived decision ID.
+Dataset fingerprint plus candle references identify the exact historical input.
+No random IDs, wall-clock timestamps or trade intents are generated.
+
+Changing future data changes the full dataset fingerprint and therefore the
+decision ID, by design. It must NOT change the earlier signal or visible-window
+fingerprint. This distinction preserves complete provenance without using future
+prices for decisions. Identical inputs and software versions reproduce the full
+Decision exactly. A future change to adapter behavior must bump its version.
+
+Example using an already ingested dataset with `warmup_candles=99` (or more):
+
+```python
+from backtest.clock import HistoricalClock
+from backtest.strategy_adapter import FrozenStrategyAdapter
+
+adapter = FrozenStrategyAdapter()
+for event in HistoricalClock(dataset, "BTCUSDT"):
+    decision = adapter.evaluate(event)
+    # Signal-only result; no trade or account action.
+```
+
+Offline tests cover deterministic replay, half-open boundaries, extra/missing
+warmup, exact repeated windows, LONG/SHORT/NONE/equality equivalence, edits to
+future candles and current eventual HLCV, next-open visibility, per-symbol
+independence, configuration rejection, float conversion bounds and immutable
+inputs. All Phase 1 tests remain unchanged. Existing full-suite startup tests
+still import and exercise the legacy bot under a fake client; the Phase 5C
+modules/tests never import it or connect to Binance.
+
+Phase 5D remains unimplemented: entries/fills, positions, protection processing,
+sizing, leverage, fees and slippage. Portfolio scheduling, metrics, downloads and
+live execution are also absent. `bot.py` must not be used as a trading entry point.
