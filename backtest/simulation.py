@@ -192,7 +192,7 @@ def protections(entry_price, signal, rules, config):
 
 
 @arithmetic
-def size_quantity(equity, entry_price, stop, signal, rules, config):
+def size_quantity(equity, entry_price, stop, signal, rules, config, *, price_distance_risk=False):
     equity, entry_price, stop = (D(canonical_decimal(v)) for v in (equity, entry_price, stop))
     if equity <= 0:
         raise SizingError("Nonpositive simulated equity")
@@ -202,6 +202,9 @@ def size_quantity(equity, entry_price, stop, signal, rules, config):
         raise DataValidationError("Stop must be adverse to entry")
     stop_fill = slipped_price(stop, "SELL" if signal == "LONG" else "BUY", config)
     loss_per_unit = abs(entry_price - stop_fill) + entry_price * config.entry_rate + stop_fill * config.exit_rate
+    if price_distance_risk:
+        # Explicit research policy: planned price risk, not modeled net exit loss.
+        loss_per_unit = abs(entry_price - stop)
     risk_size = equity * config.risk_fraction / loss_per_unit
     # Reserve entry fees in addition to initial margin. Exit costs are in stop risk.
     margin_size = equity / (entry_price / config.leverage + entry_price * config.entry_rate)
@@ -214,7 +217,7 @@ def size_quantity(equity, entry_price, stop, signal, rules, config):
 
 
 @arithmetic
-def open_position(decision, event: OpeningEvent, equity, rules, config):
+def open_position(decision, event: OpeningEvent, equity, rules, config, *, protection_policy=None):
     if (decision.symbol != event.symbol or rules.symbol != event.symbol
             or decision.open_time_ms != event.open_time_ms or decision.timeframe != event.timeframe
             or decision.dataset_fingerprint != event.dataset_fingerprint):
@@ -225,11 +228,18 @@ def open_position(decision, event: OpeningEvent, equity, rules, config):
         raise DataValidationError("Unknown entry signal")
     side = "BUY" if decision.signal == "LONG" else "SELL"
     price = slipped_price(event.opening_price, side, config)
-    stop, target = protections(price, decision.signal, rules, config)
-    quantity, planned_risk = size_quantity(equity, price, stop, decision.signal, rules, config)
+    if protection_policy is None:
+        stop, target = protections(price, decision.signal, rules, config)
+        quantity, planned_risk = size_quantity(equity, price, stop, decision.signal, rules, config)
+    else:
+        protection_policy.validate(decision, event, config)
+        stop, target = protection_policy.levels(price, decision.signal, rules)
+        quantity, planned_risk = size_quantity(equity, price, stop, decision.signal, rules, config,
+                                               price_distance_risk=True)
     fill = Fill(side, event.open_time_ms, "OPEN", event.opening_price, price, quantity,
                 price * quantity * config.entry_rate)
-    return Position(decision, fill, stop, target, D(canonical_decimal(equity)), planned_risk)
+    position = Position(decision, fill, stop, target, D(canonical_decimal(equity)), planned_risk)
+    return position if protection_policy is None else protection_policy.record(position, rules, config)
 
 
 @arithmetic
