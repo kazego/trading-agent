@@ -41,3 +41,6 @@ logs/
 *.db.lock
 *.sqlite.lock
 *.sqlite3.lock
+
+# Local immutable baseline-001 archives and study artifacts
+artifacts/baseline-001/

@@ -600,3 +600,216 @@ and a bounded reference study. No historical data has been downloaded for 5F.
 There is no Binance interaction, bot trading entry point, parameter optimization
 or change to strategy/execution/portfolio rules. The full existing offline suite
 continues to include its legacy startup tests under a fake client only.
+
+## Phase 5G: bounded historical acquisition for baseline-001
+
+`backtest/acquire.py` is an explicit opt-in acquisition/validation utility. It
+does not import the strategy, execution engine or portfolio runner, and cannot
+perform a financial backtest. It has no arbitrary URL, symbol, timeframe or date
+CLI arguments, dynamic symbol discovery, private API or credentials.
+
+```text
+python -m backtest.acquire --download-public-baseline-001
+```
+
+The fixed evaluation interval is 2024-01-01 00:00:00 UTC through the end of
+2025-12-31, represented as `[1704067200000,1767225600000)` (exclusive 2026-01-01
+00:00 UTC). Each symbol requires 70,176 evaluation candles plus 99 prior completed
+warmup candles: 70,275 selected rows. Warmup starts 2023-12-30 23:15 UTC. These
+99 rows are input history, not an extension of the evaluation interval.
+
+The fixed archive plan contains 75 official monthly USD-M files: December 2023
+for warmup and January 2024 through December 2025 for each of BTCUSDT, ETHUSDT and
+ADAUSDT, always 15m. Monthly file granularity fetches unused early-December rows;
+Phase 5B selects only the required warmup and evaluation rows. The source pattern:
+
+```text
+https://data.binance.vision/data/futures/um/monthly/klines/{SYMBOL}/15m/{SYMBOL}-15m-{YYYY-MM}.zip
+```
+
+Each exact URL has a corresponding `.CHECKSUM` URL. This is public historical
+file acquisition, not access to any Futures trading endpoint. HTTPS is mandatory;
+all redirects are rejected. At most 150 HTTP requests occur in one uncached run
+(one checksum and one ZIP per planned file); there are no automatic retries.
+Each request times out after 30 seconds. Limits are 512 bytes per checksum,
+8 MiB per ZIP and 16 MiB for the single expected decompressed CSV. No ZIP member
+is extracted to the filesystem. Only the exact expected member name is accepted;
+encrypted or multi-member archives and unexpected paths fail closed.
+
+Official SHA-256 checksum content must name the exact expected ZIP and match its
+bytes. This utility requires the checksum to be available rather than silently
+continuing without it. Invalid downloads, missing archives/checksums or monthly
+contract errors stop acquisition; no dates or sources are substituted.
+
+### Timestamp and data contract
+
+Timestamp recognition checks both integer values against the NAMED archive month
+and the exact 15m opening/closing relationship. It does not guess from digit count
+alone. Recognized explicit contracts are:
+
+- milliseconds: close = open + 899999;
+- microseconds with inclusive interval end: close = open + 899999999;
+- microseconds produced by scaling milliseconds: close = open + 899999000.
+
+For the microsecond forms, opens must be divisible by 1000; integer division by
+1000 maps both fields to the existing millisecond candle contract. These cases
+are tested and recorded separately in provenance. Mixed conventions within one
+file, seconds, ambiguous submillisecond close values and timestamps outside the
+named month are rejected. Files with different recognized contracts can coexist
+because each conversion is explicit and recorded; Phase 5B remains unchanged.
+
+Normalized CSV retains all twelve fields and original financial strings; only
+timestamps, header/BOM treatment and CSV line formatting are canonicalized. It
+does not interpolate, deduplicate or repair market values. Each symbol's entire
+normalized source list is passed through the unchanged Phase 5B `ingest`, with
+the fixed interval, millisecond units, fixed completion cutoff and 99-row warmup.
+Thus OHLC validity, complete aligned coverage, ordering, gaps, duplicate conflicts,
+completion and warmup are still enforced by the existing layer.
+
+### Local artifacts and reproducibility
+
+Stable local root: `artifacts/baseline-001/historical/` (Git-ignored).
+
+- `raw/{SYMBOL}/`: original ZIPs and official checksum files;
+- `normalized/{SYMBOL}/`: deterministic twelve-column millisecond CSVs;
+- `acquisition-manifest.json`: every exact source/checksum URL, raw/checksum-file/
+  normalized-CSV hashes, detected timestamp convention, source row counts,
+  selected counts and full Phase 5B dataset provenance/fingerprints;
+- `baseline-001-pending.json`: frozen baseline parameters with unapproved cost
+  and symbol-rule inputs explicitly null; it is not a completed run report.
+
+Path components are fixed safe names and resolved paths must remain inside the
+selected root. Files are created exclusively. Existing identical files can be
+reused; changed or corrupt files cause an error rather than silent replacement.
+Interrupted network reads are buffered before writing. A filesystem write failure
+can still leave an incomplete file, which the next run rejects for operator review.
+Successful cached downloads are rechecked, and a resumed run produces the same
+manifest if its source bytes are unchanged. No wall-clock dates or cache-hit flags
+enter the acquisition fingerprint. The utility never overwrites a financial
+report or claims an existing completed baseline has been regenerated.
+
+### Cost gate and reference study status
+
+The approved repository contains zero-cost defaults for mechanics and illustrative
+fee/slippage test cases, but no explicitly approved fee/slippage scenario for
+this financial reference study. Per the Phase 5G instruction, execution MUST STOP
+after data validation until the operator approves research cost inputs. Test
+rates are not Binance account fees and are not silently promoted to research
+assumptions. Versioned historical symbol-rule assumptions are also needed before
+an actual run; synthetic test filters are not historical exchange filters.
+
+No baseline-001 financial run is performed by this utility. No financial summary,
+return, profitability conclusion, or report fingerprint may be invented while the
+run is pending. The next authorized reference run must use the frozen EMA9/21,
+1,000 USDT, 1% risk, 3x leverage, one position, BTC/ETH/ADA priority, SL1.5%, TP3%
+and approved Phase 5C-F semantics exactly once, with explicitly approved research
+cost and rule assumptions. Its first successful report remains immutable.
+
+Historical performance will not establish future profitability. Funding and
+liquidation remain excluded, MTM is sampled at 15m closes, and fees/slippage will
+be modeled assumptions. No optimization, parameter variants, Strategy Lab or
+live bot execution is part of this phase.
+
+### Acquisition outcome (financial study not run)
+
+All 75 monthly ZIPs were acquired from the fixed official URLs and matched their
+75 official SHA-256 checksum files. Every downloaded archive used milliseconds;
+no timestamp unit conversion was necessary. All three symbols passed unchanged
+Phase 5B validation. Each has 70,176 evaluation candles plus 99 warmup candles,
+70,275 selected in total, with zero identical duplicates and zero incomplete
+exclusions. No missing/conflicting candles or interval substitution occurred.
+The 2,877 unused early-December rows per symbol are outside required warmup.
+
+Normalized selected-candle fingerprints:
+
+| Symbol | SHA-256 |
+| --- | --- |
+| BTCUSDT | `4fc343f86d7f170c934de4881bbe7aeb2cfcea3a9835de4409156b825344d075` |
+| ETHUSDT | `841a2a44ca567cb648a105a56728b43efe47d292675100a18e3e3e19e49ae154` |
+| ADAUSDT | `a10e8fe6b13ce5c368174f82a4d29c331e95c166d14681e3c879c53860e2b0a1` |
+
+Full dataset fingerprints (including Phase 5B provenance):
+
+| Symbol | SHA-256 |
+| --- | --- |
+| BTCUSDT | `affdba7de603b8d6dc165a50139037472c1cd0cc8a8e990c7545b8389bd50ae9` |
+| ETHUSDT | `7ab71d3d34d647f95ea79876962219fb0c70207c38368f2ca9c58d0f183f5eb0` |
+| ADAUSDT | `4629a95f75bd004b178e22f26a82afd8d73e7860bf6e64b0bcb89252f3722016` |
+
+Acquisition manifest fingerprint:
+`0b3249ee8b2038875b022dd41bf134c5c29c5c4bf2eda8b80c0c78adcb5af721`.
+All individual source/checksum/normalized-file hashes are in the local canonical
+`artifacts/baseline-001/historical/acquisition-manifest.json`.
+
+baseline-001 financial execution remains NOT_RUN. No report metrics or financial
+report fingerprint exist yet. Required next approval: one explicit research
+entry/exit fee and adverse-slippage scenario, plus versioned symbol-rule
+assumptions for BTCUSDT/ETHUSDT/ADAUSDT. No hidden costs or synthetic rule values
+were used for a financial study.
+
+### Approved baseline-001 continuation
+
+The preceding acquisition outcome and `historical/baseline-001-pending.json`
+are preserved records of the earlier gate, not the current approval state.
+Before seeing financial results, the operator approved FEES_AND_SLIPPAGE,
+0.0005 fee per fill and 0.0002 adverse slippage per fill (2 bps).
+These are RESEARCH ASSUMPTIONS, not the operator's actual Binance fees,
+guaranteed fees or exact historical costs. Nominal round-trip friction is
+approximately 14 bps; actual modeled fee amounts depend on fill notional.
+
+`backtest.baseline` provides two explicit, separate commands:
+
+```
+python -m backtest.baseline --capture-public-rules
+python -m backtest.baseline --run-approved-baseline-001
+```
+
+The first performs only an unauthenticated GET of the official public
+`https://fapi.binance.com/fapi/v1/exchangeInfo` endpoint. This endpoint returns
+exchange-wide information; only BTCUSDT, ETHUSDT and ADAUSDT relevant filters
+are retained. Redirects, missing filters, differing quantity grids and duplicate
+symbol/filter records fail closed. No SDK, account API or live bot is used.
+The second command is offline and revalidates local CSV checksums plus all
+approved dataset fingerprints, without downloading or rewriting history.
+
+The frozen research-rules-v1 snapshot was retrieved at
+2026-09-08T19:32:47.672404+00:00. Its timestamp is provenance only and is excluded
+from the rules and result fingerprints.
+
+| Symbol | Tick | Quantity step | Min quantity | Max market quantity | Min notional USDT |
+| --- | --- | --- | --- | --- | --- |
+| BTCUSDT | 0.1 | 0.001 | 0.001 | 120 | 50 |
+| ETHUSDT | 0.01 | 0.001 | 0.001 | 2000 | 20 |
+| ADAUSDT | 0.0001 | 1 | 1 | 3000000 | 5 |
+
+LOT_SIZE maximum quantities are respectively 1000, 10000 and 30000000;
+MARKET_LOT_SIZE has the same steps/minimums and tighter maximums shown above.
+The mapping uses their intersection, PRICE_FILTER tickSize, and MIN_NOTIONAL
+notional, validated by the existing Phase 5D SymbolRules model. The snapshot
+preserves raw relevant filters as well as normalized values.
+
+Rules fingerprint:
+`e382b5da9ad38a6836e24d488fb8306e61b8849906000ec015d3784486802872`.
+
+These current rules are STATIC RESEARCH ASSUMPTIONS applied to 2024-2025;
+they are not claimed historically identical throughout the study. Phase 5D
+does not emulate price bands, mark-price market bounds, depth or complete
+exchange order acceptance. No extra matching-engine behavior is introduced.
+
+Artifacts are under `artifacts/baseline-001/`: `research-rules-v1.json` and
+`financial/approved-inputs.json`, `financial/first-result.pickle`,
+`financial/report.json`, `financial/report.txt`,
+`financial/reproducibility-manifest.json`, `financial/report-fingerprint.txt`.
+The financial directory is claimed exclusively before simulation. Its existence
+blocks a second execution, even after interruption. The first completed result
+is checkpointed before reporting; never load pickle files from untrusted sources.
+All finalized outputs use exclusive creation. Reporting recovery, if needed,
+must use the first checkpoint, not another simulation. No parameter variants,
+optimization, Strategy Lab or live execution are authorized.
+
+The supplemental reproducibility manifest binds the approved costs, rules
+fingerprint, source hashes and Phase 5F manifest/report fingerprint. Rules
+retrieval time is retained separately and never enters deterministic results.
+Funding and liquidation remain excluded. MTM uses candle-close price-only
+unrealized P&L with entry fees deferred until closure and no hypothetical exit
+fees. Realized balance and realized drawdown remain separately labeled.
