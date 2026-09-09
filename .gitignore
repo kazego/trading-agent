@@ -47,3 +47,6 @@ artifacts/baseline-001/
 
 # Derived local research signal data (not baseline artifacts)
 artifacts/research-data/
+
+# Immutable research runs, trial ledger and comparisons
+artifacts/research/
