@@ -4,8 +4,9 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from enum import Enum
+from typing import Callable
 
-from backtest.clock import HistoricalClock
+from backtest.clock import HistoricalClock, OpeningEvent
 from backtest.data import DataValidationError, STEP_MS, _hash, canonical_decimal
 from backtest.simulation import (
     EXCLUSIONS, SIMULATION_VERSION, ClosedTrade, ExitReason, Position, SimulationConfig,
@@ -97,14 +98,16 @@ def _validate_inputs(datasets, rules):
 
 
 @arithmetic
-def simulate_portfolio(datasets, rules, config=SimulationConfig()):
+def simulate_portfolio(datasets, rules, config=SimulationConfig(), *,
+                       decision_provider: Callable[[OpeningEvent], Decision | None] | None = None):
     """Realized shared equity; only completed net P&L updates the balance.
 
     If a higher-priority signal is untradeable, record REJECTED and consider the
     next signal. Once an entry succeeds, lower-priority signals are blocked.
     """
     clocks, end_ms = _validate_inputs(datasets, rules)
-    adapter = FrozenStrategyAdapter()
+    adapter = FrozenStrategyAdapter() if decision_provider is None else None
+    evaluate = adapter.evaluate if adapter is not None else decision_provider
     bars = {symbol: {c.open_time_ms: c for c in datasets[symbol].candles if c.symbol == symbol}
             for symbol in PRIORITY}
     equity = config.starting_equity
@@ -115,7 +118,15 @@ def simulate_portfolio(datasets, rules, config=SimulationConfig()):
         if any(event.open_time_ms != timestamp for event in synchronized):
             raise DataValidationError("Portfolio clocks lost alignment")
         # Obtain ALL opening decisions before accessing this boundary's full bars.
-        decisions = tuple(adapter.evaluate(event) for event in synchronized)
+        decisions = tuple(evaluate(event) for event in synchronized)
+        if decision_provider is not None:
+            for event, decision in zip(synchronized, decisions):
+                if decision is not None and (not isinstance(decision, Decision)
+                        or decision.symbol != event.symbol or decision.timeframe != event.timeframe
+                        or decision.open_time_ms != event.open_time_ms
+                        or decision.dataset_fingerprint != event.dataset_fingerprint
+                        or decision.signal not in ("LONG", "SHORT", "NONE")):
+                    raise DataValidationError("Supplied decision does not match its execution opening")
         equity_before = equity
         symbol_before = position.decision.symbol if position is not None else None
         held_at_open = position is not None
@@ -128,6 +139,8 @@ def simulate_portfolio(datasets, rules, config=SimulationConfig()):
                 position = None
         dispositions = []
         for event, decision in zip(synchronized, decisions):
+            if decision is None:
+                continue  # No signal evaluation occurred; do not fabricate a NONE decision.
             if decision.signal == "NONE":
                 dispositions.append(DecisionRecord(decision, Disposition.NONE))
             elif held_at_open:
