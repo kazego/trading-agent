@@ -22,7 +22,7 @@ from research.registry import Registry
 from research.schedule import ResearchSchedule
 from research.scorecard import build_scorecard
 from research.spec import (ExperimentSpec, Role, SYMBOLS, RULES_HASH, DEV_START,
-    VALIDATION_START, canonical, encoded, fingerprint, policy)
+    VALIDATION_START, canonical, encoded, fingerprint, policy, digest)
 from research.strategy import EMACrossover, EMAConfig, VERSION
 
 
@@ -155,18 +155,39 @@ def execute(*, registry, spec, request, attempt_id, datasets, views, strategy, c
                    for e in events) and not registry._find(events,'OUTCOME','attempt_id',attempt_id):
                 registry.finish_attempt(attempt_id,'FAILED',error=type(exc).__name__)
         raise
-    root=Path(artifact_root)
-    if root.name!='research': raise ValueError('Dedicated research artifact namespace required')
-    output=root/spec.id/'development'
+    return execute_validated(registry=registry,spec=spec,attempt_id=attempt_id,datasets=datasets,
+        config=config,schedule=schedule,rules=rules,identity=identity,artifact_root=artifact_root)
+
+
+def artifact_destination(artifact_root, experiment_id):
+    """One locator shared by preflight and execution."""
+    digest(experiment_id)
+    root = Path(artifact_root)
+    if root.name != 'research': raise ValueError('Dedicated research artifact namespace required')
+    return root / experiment_id / 'development'
+
+
+def execute_validated(*, registry, spec, attempt_id, datasets, config, schedule, rules, identity,
+                      artifact_root, protection_provider=None, scorecard_builder=None):
+    """Shared artifact lifecycle, called only after phase-specific validation.
+
+    This internal integration primitive is not an independently authorized runner.
+    """
+    output=artifact_destination(artifact_root,spec.id)
     output.parent.mkdir(parents=True,exist_ok=True)
     output.mkdir()  # Exclusive reservation; do not catch and mark another attempt failed.
     try:
         approved=dict(identity=identity,spec=spec.record,configuration=asdict(config),rules=asdict_rules(rules))
         _write(output/'approved-inputs.json',encoded(approved))
-        result=simulate_portfolio(datasets,rules,config,decision_provider=schedule)
+        if protection_provider is None:
+            result=simulate_portfolio(datasets,rules,config,decision_provider=schedule)
+        else:
+            result=simulate_portfolio(datasets,rules,config,decision_provider=schedule,
+                                      protection_provider=protection_provider)
         # Preserve all financial and decision records BEFORE any analytics.
         _write(output/'first-result.json',encoded(dict(result=asdict(result),result_fingerprint=result.fingerprint)))
-        card=build_scorecard(result,datasets,dict(identity,portfolio_result_fingerprint=result.fingerprint))
+        builder=build_scorecard if scorecard_builder is None else scorecard_builder
+        card=builder(result,datasets,dict(identity,portfolio_result_fingerprint=result.fingerprint))
         _write(output/'scorecard.json',encoded(card))
         _write(output/'report.txt',human_report(card).encode('utf-8'))
         manifest=dict(identity=identity,result_fingerprint=result.fingerprint,scorecard_fingerprint=card['scorecard_fingerprint'],

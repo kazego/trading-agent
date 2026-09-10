@@ -99,7 +99,8 @@ def _validate_inputs(datasets, rules):
 
 @arithmetic
 def simulate_portfolio(datasets, rules, config=SimulationConfig(), *,
-                       decision_provider: Callable[[OpeningEvent], Decision | None] | None = None):
+                       decision_provider: Callable[[OpeningEvent], Decision | None] | None = None,
+                       protection_provider=None):
     """Realized shared equity; only completed net P&L updates the balance.
 
     If a higher-priority signal is untradeable, record REJECTED and consider the
@@ -149,7 +150,14 @@ def simulate_portfolio(datasets, rules, config=SimulationConfig(), *,
                 dispositions.append(DecisionRecord(decision, Disposition.BLOCKED, "BLOCKED_PRIORITY"))
             else:
                 try:
-                    position = open_position(decision, event, equity, rules[event.symbol], config)
+                    if protection_provider is None:
+                        position = open_position(decision, event, equity, rules[event.symbol], config)
+                    else:
+                        protection = protection_provider(decision, event)
+                        if protection is None:
+                            raise DataValidationError("Explicit protection provider returned no policy")
+                        position = open_position(decision, event, equity, rules[event.symbol], config,
+                                                 protection_policy=protection)
                 except SizingError as exc:
                     dispositions.append(DecisionRecord(decision, Disposition.REJECTED, str(exc)))
                 else:
