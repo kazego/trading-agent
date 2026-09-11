@@ -50,3 +50,6 @@ artifacts/research-data/
 
 # Immutable research runs, trial ledger and comparisons
 artifacts/research/
+
+# Separate forward-paper manifests, public candles and observation journals
+artifacts/forward-paper/
