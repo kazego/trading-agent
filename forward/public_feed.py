@@ -1,12 +1,19 @@
 """Fixed unauthenticated GET operations only. No SDK, env, proxies or redirects."""
 import http.client
 import json
+import ssl
 from urllib.parse import urlencode
 
 from backtest.data import Candle, SYMBOLS, STEP_MS, _timestamp
 
 HOST = 'fapi.binance.com'
 MAX_BYTES = 2_000_000
+
+
+class TemporaryPublicError(ValueError):
+    def __init__(self, *, retry_after_s=0):
+        self.retry_after_s=retry_after_s
+        super().__init__('Temporary public market-data failure')
 
 
 def _read(path):
@@ -18,12 +25,26 @@ def _read(path):
     try:
         connection.request('GET', path, headers={'Accept': 'application/json'})
         response = connection.getresponse()
+        if response.status in (408,429,500,502,503,504):
+            header=response.getheader('Retry-After')
+            retry=900 if response.status==429 else 0
+            if header is not None:
+                if not isinstance(header,str) or not header.isascii() or not header.isdigit():
+                    raise ValueError('Unrecognized Retry-After; fail closed')
+                retry=max(retry,int(header))
+            raise TemporaryPublicError(retry_after_s=retry)
         if response.status != 200:
             raise ValueError('Public endpoint unavailable; no fallback or redirect')
         raw = response.read(MAX_BYTES+1)
         if len(raw) > MAX_BYTES:
             raise ValueError('Public response exceeds bound')
         return json.loads(raw, parse_float=lambda _: (_ for _ in ()).throw(ValueError('Unexpected float')))
+    except TemporaryPublicError:
+        raise
+    except ssl.SSLError:
+        raise ValueError('Public market-data request failed') from None
+    except (OSError, http.client.RemoteDisconnected, http.client.IncompleteRead):
+        raise TemporaryPublicError() from None
     except Exception:
         # Do not interpolate remote payloads, URLs, exception text or headers.
         raise ValueError('Public market-data request failed') from None

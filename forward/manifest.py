@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCES = ('forward/__init__.py', 'forward/__main__.py', 'forward/model.py',
            'forward/public_feed.py', 'forward/manifest.py', 'forward/store.py',
            'forward/observer.py', 'backtest/data.py', 'research/data.py',
-           'research/features.py', 'research/spec.py', 'runtime.py', 'errors.py')
+           'research/features.py', 'research/spec.py', 'runtime.py', 'errors.py',
+           'forward/operations.py','forward/timing.py','forward/readout.py',
+           'backtest/__init__.py','research/__init__.py','scripts/live0a-task.ps1')
 
 
 def implementation():
@@ -67,17 +69,23 @@ def freeze(directory, *, t0, created_ms):
     return record
 
 
-def load(directory):
+def load(directory, *, read_only=False):
     verify_references()
     raw = (Path(directory)/'manifest.json').read_bytes()
     record = json.loads(raw)
     if raw != encoded(record)+b'\n' or set(record) != {'spec','t0_ms','created_ms','history_start_ms','first_observation_ms','manifest_fingerprint'}:
         raise ValueError('Invalid canonical manifest')
     body = {k:v for k,v in record.items() if k != 'manifest_fingerprint'}
-    if (fingerprint(body) != record['manifest_fingerprint'] or record['spec'] != specification()
+    if (fingerprint(body) != record['manifest_fingerprint']
             or type(record['t0_ms']) is not int or record['t0_ms'] % FOUR_HOURS
             or record['t0_ms'] < record['created_ms']+300000
             or record['history_start_ms'] != record['t0_ms']-HISTORY
             or record['first_observation_ms'] != record['t0_ms']+FOUR_HOURS):
         raise ValueError('Manifest identity, implementation or T0 changed')
+    from forward.operations import LEGACY_SPEC, verify_legacy, load_operations
+    if fingerprint(record['spec']) == LEGACY_SPEC:
+        verify_legacy(record)
+        if not read_only: load_operations(directory,record)
+    elif record['spec'] != specification():
+        raise ValueError('Unapproved manifest implementation')
     return record

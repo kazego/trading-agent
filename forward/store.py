@@ -101,7 +101,13 @@ class Store:
         value = self.db.execute('SELECT max(boundary_ms) FROM observations').fetchone()[0]
         return self.manifest['first_observation_ms'] if value is None else value+FOUR_HOURS
 
-    def observation(self, record):
+    def observation(self, record, *, clock=None, operations=None):
+        if clock is not None:
+            from forward.timing import classify
+            ready=clock.now()
+            classify(record['boundary_ms'],ready)  # Reject before any write.
+            record=dict(record,observed_ms=ready,decision_ready_ms=ready,timing='UNCONFIRMED',
+                        operations_fingerprint=operations['operations_fingerprint'])
         with self.db:
             if record['boundary_ms'] != self.next_boundary():
                 raise ValueError('Duplicate or noncontiguous observation')
@@ -109,9 +115,21 @@ class Store:
                 (record['boundary_ms'],encoded(record).decode(),fingerprint(record)))
             self.db.execute('INSERT INTO events(payload) VALUES(?)',
                 (encoded(dict(label=LABEL,event='OBSERVATION',fingerprint=fingerprint(record))).decode(),))
+        if clock is not None:
+            # This sample is AFTER the FULL synchronous observation commit.
+            persisted=clock.now()
+            tolerance=(operations['policy']['timely_ms'] if record['boundary_ms']>=operations['effective_boundary_ms']
+                       else self.manifest['spec']['max_online_lateness_ms'])
+            self.event('RECEIPT',observed_ms=persisted,boundary_ms=record['boundary_ms'],
+                observation_fingerprint=fingerprint(record),timing=classify(record['boundary_ms'],persisted,tolerance),
+                operations_fingerprint=operations['operations_fingerprint'],tolerance_ms=tolerance)
 
-    def event(self, name):
-        if name not in ('START','STOP','PUBLIC_ERROR','OBSERVATION_ERROR','BLOCKED'):
+    def event(self, name, **metadata):
+        if name not in ('START','STOP','PUBLIC_ERROR','OBSERVATION_ERROR','BLOCKED','RECOVERABLE',
+                        'RECEIPT','RECOVERED_RECEIPT','BACKOFF'):
             raise ValueError('Only sanitized event codes')
+        if set(metadata)-{'observed_ms','boundary_ms','observation_fingerprint','timing',
+                          'operations_fingerprint','tolerance_ms','retry_not_before_ms','code'}:
+            raise ValueError('Unrecognized event metadata')
         with self.db:
-            self.db.execute('INSERT INTO events(payload) VALUES(?)', (encoded(dict(label=LABEL,event=name)).decode(),))
+            self.db.execute('INSERT INTO events(payload) VALUES(?)', (encoded(dict(label=LABEL,event=name,**metadata)).decode(),))
