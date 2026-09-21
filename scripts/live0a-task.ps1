@@ -21,7 +21,7 @@ $taskName = 'TradingAgent-LIVE-0A-live-0a-001'
 $taskUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 function XmlEscape([string]$Value) { [System.Security.SecurityElement]::Escape($Value) }
 $xml = @"
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>FORWARD_PAPER / NON_EXECUTING public-only LIVE-0A.1</Description></RegistrationInfo>
   <Triggers><TimeTrigger><Repetition><Interval>PT15M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>$(XmlEscape $StartBoundary)</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
@@ -33,7 +33,9 @@ $xml = @"
 if ($Action -eq 'Generate') {
     $stream = [IO.File]::Open([IO.Path]::GetFullPath($OutputPath), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
     try {
-        $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($xml)
+        # Match the UTF-16 string passed to Task Scheduler and BOM-marked disk bytes.
+        $encoding = [Text.Encoding]::Unicode
+        $bytes = $encoding.GetPreamble() + $encoding.GetBytes($xml)
         $stream.Write($bytes,0,$bytes.Length)
         $stream.Flush($true)
     } finally { $stream.Dispose() }

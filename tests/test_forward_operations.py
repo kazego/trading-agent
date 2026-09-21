@@ -290,9 +290,53 @@ class TaskTests(unittest.TestCase):
             r=subprocess.run(['powershell','-NoProfile','-ExecutionPolicy','RemoteSigned','-File',str(manifest.ROOT/'scripts/live0a-task.ps1'),
                 '-StartBoundary',stamp,'-OutputPath',str(path)],capture_output=True,text=True)
             self.assertEqual(r.returncode,0,r.stderr)
-            text=path.read_text()
+            raw=path.read_bytes()
+            self.assertTrue(raw.startswith(b'\xff\xfe'))
+            text=raw.decode('utf-16')
+            self.assertTrue(text.startswith('<?xml version="1.0" encoding="UTF-16"?>'))
+            self.assertEqual(raw,b'\xff\xfe'+text.encode('utf-16-le'))
+            import xml.etree.ElementTree as ET
+            self.assertEqual(ET.tostring(ET.fromstring(raw)),ET.tostring(ET.fromstring(text)))
+            root=ET.fromstring(raw)
+            ns={'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+            expected={'Actions/Exec/Command':str(manifest.ROOT/'.venv/Scripts/pythonw.exe'),
+                      'Actions/Exec/Arguments':'-m forward poll --run-id live-0a-001 --public-data-only',
+                      'Actions/Exec/WorkingDirectory':str(manifest.ROOT),
+                      'Triggers/TimeTrigger/StartBoundary':stamp,
+                      'Triggers/TimeTrigger/Repetition/Interval':'PT15M',
+                      'Principals/Principal/LogonType':'InteractiveToken',
+                      'Principals/Principal/RunLevel':'LeastPrivilege',
+                      'Settings/Enabled':'false','Settings/MultipleInstancesPolicy':'IgnoreNew',
+                      'Settings/ExecutionTimeLimit':'PT10M','Settings/RunOnlyIfIdle':'false'}
+            for key,value in expected.items():
+                self.assertEqual(root.find('/'.join('t:'+part for part in key.split('/')),ns).text,value)
+            self.assertIsNone(root.find('t:Settings/t:RestartOnFailure',ns))
             for value in ('PT15M','PT10M','IgnoreNew','InteractiveToken','<Enabled>false</Enabled>',
                           '<StartWhenAvailable>true</StartWhenAvailable>','.venv\\Scripts\\pythonw.exe'):
                 self.assertIn(value,text)
             self.assertNotIn('codex-runtimes',text)
             self.assertIn('NOTHING REGISTERED',r.stdout)
+            # Local TaskDefinition parsing only: no registration, activation or task run.
+            # Reproduce the old UTF-8 declaration mismatch on the same Unicode string.
+            probe=r'''
+$ErrorActionPreference='Stop'
+$xml=[IO.File]::ReadAllText($args[0])
+$service=New-Object -ComObject Schedule.Service
+$service.Connect()
+$definition=$service.NewTask(0)
+$definition.XmlText=$xml
+if ($definition.Settings.Enabled) { throw 'Task must remain disabled' }
+$old=$xml.Replace('encoding="UTF-16"','encoding="UTF-8"')
+$rejected=$false
+try { $definition.XmlText=$old } catch { $rejected=$true; Write-Output $_.Exception.Message }
+if (-not $rejected) { throw 'Old encoding mismatch did not reproduce' }
+Write-Output 'UTF16_ACCEPTED_UTF8_REJECTED_NO_REGISTRATION'
+'''
+            # Pass the path as a literal through an environment variable to avoid shell quoting.
+            import os
+            env=dict(os.environ,FORWARD_XML_TEST_PATH=str(path))
+            probe=probe.replace('$args[0]','$env:FORWARD_XML_TEST_PATH')
+            result=subprocess.run(['powershell','-NoProfile','-Command',probe],
+                                  capture_output=True,text=True,env=env)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertIn('UTF16_ACCEPTED_UTF8_REJECTED_NO_REGISTRATION',result.stdout)
