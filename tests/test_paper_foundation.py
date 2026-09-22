@@ -321,7 +321,8 @@ class IsolationTests(unittest.TestCase):
         allowed = {'dataclasses', 'decimal', 'hashlib', 'importlib.metadata', 'json', 'pathlib',
                    'platform', 'sqlite3', 'backtest.data', 'research.spec', 'runtime',
                    'forward.manifest', 'forward.operations', 'forward.readout', 'paper.model'}
-        for path in root.glob('*.py'):
+        # Frozen B1 surface; later phases maintain their own import allowlist.
+        for path in (root/name for name in ('__init__.py', 'model.py', 'source.py', 'store.py')):
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
