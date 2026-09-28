@@ -135,7 +135,7 @@ class BoundaryBatch:
                    evidence.source.id, evidence.id, fingerprint(o), fingerprint(r) if r else None)
 
 
-def decide(binding, batch, *, accepted_ms, slot):
+def decide(binding, batch, *, accepted_ms, slot, equity_basis=None):
     """Pure arbitration. Only AcceptanceStore supplies this view in the normal path."""
     timestamp(accepted_ms)
     if type(binding) is not AcceptanceBinding or type(batch) is not BoundaryBatch:
@@ -147,6 +147,22 @@ def decide(binding, batch, *, accepted_ms, slot):
         raise ValueError('Incomplete, inconsistent or not-yet-available batch')
     if slot not in ('EMPTY', 'PENDING', 'OPEN', 'BLOCKED'):
         raise ValueError('Unknown slot state')
+    # B4 supplies an explicit, journal-verified closed-trade balance. The B2
+    # default remains its initial-capital basis; no implicit account lookup.
+    equity = binding.equity
+    if equity_basis is not None:
+        if type(equity_basis) is not bytes:
+            raise ValueError('Immutable committed equity basis required')
+        equity = parse(equity_basis)
+        if (set(equity) != {'label', 'basis', 'draft_id', 'amount', 'currency', 'accounting_head'}
+                or equity['label'] != binding.equity['label']
+                or equity['basis'] != 'B4_REALIZED_CLOSED_TRADE_BALANCE'
+                or equity['draft_id'] != binding.draft.id or equity['currency'] != 'USDT'
+                or type(equity['amount']) is not str
+                or canonical_decimal(equity['amount']) != equity['amount']
+                or Decimal(equity['amount']) <= 0):
+            raise ValueError('Invalid committed realized equity basis')
+        digest(equity['accounting_head'])
     entry = batch.boundary_ms + 900000
     deadline = entry - 60000
     dispositions = []
@@ -186,7 +202,7 @@ def decide(binding, batch, *, accepted_ms, slot):
             symbol=selected.symbol, direction=selected.direction, atr14=selected.atr14,
             signal_fingerprint=selected.signal_fingerprint, signal_boundary_ms=batch.boundary_ms,
             acceptance_ms=accepted_ms, entry_boundary_ms=entry, deadline_ms=deadline,
-            equity_basis=binding.equity, equity_reference=fingerprint(binding.equity))
+            equity_basis=equity, equity_reference=fingerprint(equity))
         reservation = dict(reservation, reservation_id=fingerprint(reservation))
     body = dict(label=LABEL, version='live-0b-boundary-decision-v1', binding=binding.id,
                 boundary_ms=batch.boundary_ms, acceptance_ms=accepted_ms,

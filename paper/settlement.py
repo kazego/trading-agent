@@ -32,6 +32,7 @@ class ConfirmedEntry:
     binding: AcceptanceBinding
     evidence: SourceObservation
     result: bytes
+    equity_basis: bytes | None = None
 
     def __post_init__(self):
         if type(self.binding) is not AcceptanceBinding or type(self.evidence) is not SourceObservation:
@@ -40,7 +41,7 @@ class ConfirmedEntry:
             raise ValueError('B2 implementation identity changed')
         r = parse(self.result)
         decision = decide(self.binding, BoundaryBatch.from_evidence(self.evidence),
-                          accepted_ms=r['acceptance_ms'], slot='EMPTY')
+                          accepted_ms=r['acceptance_ms'], slot='EMPTY', equity_basis=self.equity_basis)
         reservation = decision['reservation']
         if reservation is None or r.get('confirmation') is None:
             raise ValueError('Timing-confirmed pending entry required')
@@ -223,7 +224,7 @@ def settle(pending, evidence, rules):
     if type(pending) is not ConfirmedEntry:
         raise ValueError('Confirmed B2 instruction required')
     # Revalidate immutable financial instruction before every transition.
-    ConfirmedEntry(pending.binding, pending.evidence, pending.result)
+    ConfirmedEntry(pending.binding, pending.evidence, pending.result, pending.equity_basis)
     r = pending.reservation
     def result(status, code, position=None):
         return Transition(pending.id, status, code, position=position,
