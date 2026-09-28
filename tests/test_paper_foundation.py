@@ -330,7 +330,9 @@ class IsolationTests(unittest.TestCase):
                 if isinstance(node, ast.ImportFrom): self.assertIn(node.module, allowed)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     self.assertNotIn(node.func.id, ('eval', 'exec', '__import__'))
-        self.assertFalse((root/'__main__.py').exists())
+        # B5 adds an explicitly invoked CLI; the frozen B1 surface above still
+        # has no operational imports or automatic entry-point invocation.
+        self.assertNotIn('__main__', (root/'__init__.py').read_text())
 
 
 if __name__ == '__main__':
