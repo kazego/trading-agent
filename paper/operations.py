@@ -33,8 +33,12 @@ def implementation():
 
 
 def rules_from(value):
+    schema = value.get('schema')
+    if schema not in ('paper-symbol-rules-v1', 'paper-symbol-rules-v2'):
+        raise ValueError('Unknown rule snapshot schema')
     rules=RuleSnapshot(value['version'], value['source_identity'],
-                       tuple(SymbolRules(**r) for r in value['rules']))
+                       tuple(SymbolRules(**r) for r in value['rules']),
+                       encoded(value['static_provenance']) if schema == 'paper-symbol-rules-v2' else None)
     if rules.record != value:
         raise ValueError('Noncanonical reviewed symbol rules')
     return rules

@@ -330,7 +330,7 @@ class ModelAndSourceTests(unittest.TestCase):
 
     def test_new_surface_imports_only_readonly_and_pure_utilities(self):
         root = Path(__file__).resolve().parents[1]
-        allowed = {'dataclasses', 'decimal', 'hashlib', 'pathlib', 'backtest.data', 'backtest.simulation',
+        allowed = {'dataclasses', 'datetime', 'decimal', 'hashlib', 'pathlib', 'backtest.data', 'backtest.simulation',
                    'forward.manifest', 'forward.operations', 'forward.readout', 'paper.model', 'paper.source',
                    'paper.acceptance', 'paper.reservations', 'paper.market', 'research.spec'}
         forbidden_calls = {'simulate', 'simulate_portfolio', 'open_position', 'ATRProtection', 'HistoricalClock',

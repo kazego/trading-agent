@@ -246,6 +246,8 @@ def settle(pending, evidence, rules):
         stop, target = atr_levels(price, pending.signal, atr, rule)
     except SizingError:
         return result('REJECTED_EXECUTION', 'INVALID_PROTECTION')
+    if not rules.prices_allowed(pending.symbol, price, stop, target):
+        return result('REJECTED_EXECUTION', 'STATIC_PRICE_BOUNDS')
     try:
         quantity, actual = size_quantity(equity, price, stop, pending.signal, rule, costs(), price_distance_risk=True)
     except SizingError:
