@@ -51,13 +51,30 @@ class LedgerBlocked(ValueError):
 
 
 class PaperLedger:
-    def __init__(self, directory, binding, rules, source, market, *, fault=None):
+    def __init__(self, directory, binding, rules, source, market, *, fault=None, verified_source=None, authorization=None):
         if (type(binding) is not AcceptanceBinding or type(rules) is not RuleSnapshot
                 or binding.draft.rules_fingerprint != rules.id
                 or type(source) is not SourceAdapter or type(market) is not CandleSource
                 or source._directory != market._directory
                 or source._expected != binding.draft.source or market._expected != binding.draft.source):
             raise ValueError('Explicit bound rules and approved read-only source required')
+        if verified_source is not None:
+            from paper.verified_source import VerifiedSourceSnapshot
+            if (type(verified_source) is not VerifiedSourceSnapshot
+                    or verified_source.source != binding.draft.source
+                    or verified_source.directory != source._directory):
+                raise ValueError('Incorrect invocation source snapshot')
+            verified_source.guard()
+        self.verified_source = verified_source
+        self.authorization = authorization
+        self._runtime_identity = implementation()
+        provenance = self._runtime_identity
+        if authorization is not None:
+            from paper.transition import TransitionAuthorization
+            if type(authorization) is not TransitionAuthorization or authorization.binding != binding or authorization.rules != rules:
+                raise ValueError('Explicit verified transition authorization required')
+            authorization.guard()
+            provenance = authorization.record['implementations']['b4']
         directory = Path(directory).absolute()
         if (directory.resolve() != directory or directory.parent.name != 'forward-paper-execution'
                 or directory.parent.parent.name != 'artifacts' or not directory.name.startswith('b4-')):
@@ -68,7 +85,7 @@ class PaperLedger:
         directory.mkdir(parents=True, exist_ok=True)
         self.directory, self.binding, self.rules = directory, binding, rules
         self.source, self.market, self.fault = source, market, fault
-        self.identity = dict(label=LABEL, version='paper-b4-ledger-v1', implementation=implementation(),
+        self.identity = dict(label=LABEL, version='paper-b4-ledger-v1', implementation=provenance,
             historical=HISTORICAL, binding=binding.record, rules=rules.record,
             activation='UNSET_FOUNDATION_ONLY', initial_equity='1000',
             initial_equity_availability=dict(policy='EXPLICIT_FUTURE_ACTIVATION_BOUNDARY',
@@ -172,7 +189,7 @@ class PaperLedger:
                     self._db.execute(f'INSERT OR IGNORE INTO {table} VALUES({placeholders})', row)
 
     def _verify(self):
-        if implementation() != self.identity['implementation']:
+        if implementation() != getattr(self, '_runtime_identity', self.identity['implementation']):
             raise ValueError('B4 implementation changed while ledger was open')
         if (self._db.execute('PRAGMA integrity_check').fetchone() != ('ok',)
                 or self._db.execute('PRAGMA foreign_key_check').fetchall()):
@@ -215,8 +232,19 @@ class PaperLedger:
                 self._db.rollback()
                 raise
 
+    def _source_guard(self):
+        if getattr(self, 'authorization', None) is not None:
+            self.authorization.guard()
+        if getattr(self, 'verified_source', None) is not None:
+            self.verified_source.guard()
+
+    def _candle(self, symbol, stamp):
+        return (self.verified_source.at(symbol, stamp) if self.verified_source is not None
+                else self.market.at(symbol, stamp))
+
     def _sources(self, state):
-        snapshot = self.source.snapshot()
+        self._source_guard()
+        snapshot = self.verified_source.snapshot() if self.verified_source is not None else self.source.snapshot()
         items = {o.boundary_ms: o for o in snapshot}
         if len(items) != len(snapshot) or any(o.source != self.binding.draft.source for o in snapshot):
             raise ValueError('Duplicate or incorrectly bound source batch')
@@ -226,12 +254,13 @@ class PaperLedger:
                     or old['receipt'] is not None and current.receipt != encoded(old['receipt'])):
                 raise ValueError('Previously accepted source observation/receipt changed')
         for value in state.candles.values():
-            c = value['candle']; current = self.market.at(c['symbol'], c['open_time_ms'])
+            c = value['candle']; current = self._candle(c['symbol'], c['open_time_ms'])
             if current is None or current.record != value:
                 raise ValueError('Previously consumed source candle changed')
         return items
 
     def _append(self, kind, data, request):
+        self._source_guard()
         self._hit(kind+'.before')
         self._db.execute('BEGIN IMMEDIATE')
         try:
@@ -290,7 +319,7 @@ class PaperLedger:
         with self._guard():
             state = self.reconcile(); self._sources(state)
             r = state.reservations[owner]['reservation']
-            item = self.market.at(r['symbol'], r['entry_boundary_ms'])
+            item = self._candle(r['symbol'], r['entry_boundary_ms'])
             request = 'ENTRY:'+owner if item is not None else 'WAIT:ENTRY:'+owner
             return self._append('ENTRY', dict(owner=owner, candle=item.record if item else None), request)
 
@@ -299,7 +328,7 @@ class PaperLedger:
             timestamp(open_ms)
             state = self.reconcile(); self._sources(state)
             r = state.reservations[owner]['reservation']
-            item = self.market.at(r['symbol'], open_ms)
+            item = self._candle(r['symbol'], open_ms)
             position = state.positions[owner]
             expected = position.last_processed_ms+900000 if position.last_processed_ms is not None else r['entry_boundary_ms']
             request = 'BAR:'+owner+':'+str(open_ms)

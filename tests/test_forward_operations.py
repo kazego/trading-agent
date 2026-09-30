@@ -288,7 +288,8 @@ class TaskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/'task.xml'
             r=subprocess.run(['powershell','-NoProfile','-ExecutionPolicy','RemoteSigned','-File',str(manifest.ROOT/'scripts/live0a-task.ps1'),
-                '-StartBoundary',stamp,'-OutputPath',str(path)],capture_output=True,text=True)
+                '-StartBoundary',stamp,'-OutputPath',str(path),
+                '-PythonwPath',str(manifest.ROOT/'.venv/Scripts/pythonw.exe')],capture_output=True,text=True)
             self.assertEqual(r.returncode,0,r.stderr)
             raw=path.read_bytes()
             self.assertTrue(raw.startswith(b'\xff\xfe'))

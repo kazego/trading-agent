@@ -551,7 +551,8 @@ class LedgerTests(unittest.TestCase):
     def test_network_order_import_isolation(self):
         allowed = {'contextlib','pathlib','os','sqlite3','time','dataclasses','decimal','hashlib',
                    'backtest.data','backtest.simulation','paper.acceptance','paper.market','paper.model',
-                   'paper.source','paper.journal','paper.reservations','paper.settlement','research.spec','runtime'}
+                   'paper.source','paper.journal','paper.reservations','paper.settlement','research.spec','runtime',
+                   'paper.verified_source','paper.transition'}
         root = Path(__file__).resolve().parents[1]
         for name in ('paper/journal.py', 'paper/ledger.py'):
             tree = ast.parse((root/name).read_text())

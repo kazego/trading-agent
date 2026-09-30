@@ -1,0 +1,286 @@
+{
+  "after": [
+    {
+      "full_source_passes": 1,
+      "function_seconds": 3.4866374999983236,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.176034600008279
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 3.4173700000392273,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.091454099980183
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 3.3449863999849185,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.01041470002383
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 3.763071299996227,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.475488900090568
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 3.5169637000653893,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.444781700032763
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 3.351082800072618,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.030522299930453
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 3.341996500035748,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.036132600042038
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.043925300007686,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.7483088000444695
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.209425400011241,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.966836099978536
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.481242200010456,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 5.327884099911898
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.3004563000286,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 5.122357900021598
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.987601700006053,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 5.787081400048919
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.512203700025566,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 5.3584324000403285
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.527918700012378,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 5.405605099978857
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 3.9095714999129996,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.74318939994555
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.1136491999495775,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.818014699965715
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 3.388187100063078,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 4.0725206000497565
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.482173500000499,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 5.187018799944781
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.566025399952196,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 5.344435599981807
+    },
+    {
+      "full_source_passes": 1,
+      "function_seconds": 4.5096425000811,
+      "git_processes": 1,
+      "result": {
+        "label": "FORWARD_PAPER / NON_EXECUTING",
+        "source_boundary_ms": 1791302400000,
+        "state": "WAITING",
+        "transitions": 0
+      },
+      "seconds": 5.348044899990782
+    }
+  ],
+  "after_max": 5.787081400048919,
+  "after_median": 4.7831617500050925,
+  "after_p95": 5.405605099978857,
+  "after_scope": "Fresh Python process including imports/startup, legacy root, immutable transition, checkpoint and B4 reconciliation",
+  "before": [
+    {
+      "full_source_passes": 8,
+      "git_processes": 32,
+      "result": {
+        "candles": 36000,
+        "observations": 149
+      },
+      "seconds": 17.789416900021024
+    },
+    {
+      "full_source_passes": 8,
+      "git_processes": 32,
+      "result": {
+        "candles": 36000,
+        "observations": 149
+      },
+      "seconds": 20.946137899998575
+    },
+    {
+      "full_source_passes": 8,
+      "git_processes": 32,
+      "result": {
+        "candles": 36000,
+        "observations": 149
+      },
+      "seconds": 15.586155500030145
+    }
+  ],
+  "before_median": 17.789416900021024,
+  "before_scope": "Existing B5 empty-path repeated source verification (32 Git / 8 scans); financial path excluded",
+  "passes": true,
+  "workload": {
+    "candles": 36000,
+    "financial_exposure": "EMPTY",
+    "observations": 149,
+    "receipts": 149
+  }
+}

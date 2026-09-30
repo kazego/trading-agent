@@ -42,6 +42,15 @@ class OperationsTests(unittest.TestCase):
             last_open_ms=max((t for symbol,t in self.candles if symbol==s),default=None),count=0)
             for s in ('BTCUSDT','ETHUSDT','ADAUSDT')}).start()
         patch('paper.ledger.time.monotonic_ns',return_value=0).start()
+        from paper.verified_source import VerifiedSourceSnapshot, _SEAL
+        from types import MappingProxyType
+        def captured(directory, expected, **kwargs):
+            return VerifiedSourceSnapshot(expected,tuple(self.items),MappingProxyType(dict(self.candles)),
+                encoded(__import__('paper.consumer',fromlist=['source_progress']).source_progress(None)),
+                b'{}',self.source_dir,(),expected.implementation,_SEAL)
+        patch('paper.consumer.capture',side_effect=captured).start()
+        patch.object(VerifiedSourceSnapshot,'guard').start()
+
 
     def arm(self):
         activate(self.auth,now_ms=self.auth.record['authorized_ms'],root=self.root,
@@ -249,7 +258,8 @@ class OperationsTests(unittest.TestCase):
         path=self.root/'task.xml'
         script=Path(__file__).parents[1]/'scripts/live0b-task.ps1'
         result=subprocess.run(['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File',str(script),
-            '-RunId',self.run,'-StartBoundary','2099-01-01T00:00:00Z','-OutputPath',str(path)],capture_output=True)
+            '-RunId',self.run,'-StartBoundary','2099-01-01T00:00:00Z','-OutputPath',str(path),
+            '-PythonwPath',str(script.parents[1]/'.venv/Scripts/pythonw.exe')],capture_output=True)
         self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
         raw=path.read_bytes();self.assertTrue(raw.startswith(b'\xff\xfe'))
         tree=ET.fromstring(raw);ns={'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}

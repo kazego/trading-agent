@@ -44,7 +44,9 @@ def report(run_id, command, *, root=ROOT, now_ms):
         identity=parse(identity_row[1].encode())
         from paper.journal import implementation,HISTORICAL
         from research.spec import fingerprint
-        expected=dict(label=LABEL,version='paper-b4-ledger-v1',implementation=implementation(),
+        from paper.transition import TransitionAuthorization
+        provenance=auth.record['implementations']['b4'] if type(auth) is TransitionAuthorization else implementation()
+        expected=dict(label=LABEL,version='paper-b4-ledger-v1',implementation=provenance,
             historical=HISTORICAL,binding=auth.binding.record,rules=auth.rules.record,
             activation='UNSET_FOUNDATION_ONLY',initial_equity='1000',
             initial_equity_availability=dict(policy='EXPLICIT_FUTURE_ACTIVATION_BOUNDARY',available_at_ms=auth.record['t0_ms']))
@@ -52,6 +54,7 @@ def report(run_id, command, *, root=ROOT, now_ms):
         verifier=object.__new__(PaperLedger)
         verifier._db=db; verifier.identity=identity; verifier.identity_id=identity_row[0]
         verifier.binding=auth.binding; verifier.rules=auth.rules
+        verifier._runtime_identity=implementation()
         state=verifier._verify()
     with localcontext() as ctx:
         ctx.prec=50
