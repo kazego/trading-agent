@@ -332,7 +332,7 @@ class ModelAndSourceTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         allowed = {'dataclasses', 'datetime', 'decimal', 'hashlib', 'pathlib', 'backtest.data', 'backtest.simulation',
                    'forward.manifest', 'forward.operations', 'forward.readout', 'paper.model', 'paper.source',
-                   'paper.acceptance', 'paper.reservations', 'paper.market', 'research.spec'}
+                   'paper.acceptance', 'paper.reservations', 'paper.market', 'research.spec', 'paper.clock_v3'}
         forbidden_calls = {'simulate', 'simulate_portfolio', 'open_position', 'ATRProtection', 'HistoricalClock',
                            'create_order', 'poll', 'accept', 'sqlite3.connect'}
         for name in ('paper/market.py', 'paper/settlement.py'):

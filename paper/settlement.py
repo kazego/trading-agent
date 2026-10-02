@@ -46,7 +46,8 @@ class ConfirmedEntry:
         if reservation is None or r.get('confirmation') is None:
             raise ValueError('Timing-confirmed pending entry required')
         c = r['confirmation']
-        expected_confirmation = AcceptanceStore._confirmation(reservation, c['durable_ms'], c['elapsed_ns'])
+        from paper.clock_v3 import replay_confirmation
+        expected_confirmation = replay_confirmation(reservation,c)
         if expected_confirmation['status'] != 'PENDING_ENTRY':
             raise ValueError('Late, blocked or unconfirmed acceptance')
         dispositions = parse(encoded(decision['dispositions']))

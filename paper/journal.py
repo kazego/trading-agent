@@ -26,7 +26,7 @@ def implementation():
     root = Path(__file__).resolve().parents[1]
     return fingerprint(dict(version='paper-b4-v1', historical=HISTORICAL, settlement=b3_identity(),
         sources={p: hashlib.sha256((root/p).read_text(encoding='utf-8').encode()).hexdigest()
-                 for p in ('paper/journal.py', 'paper/ledger.py')}))
+                 for p in ('paper/journal.py', 'paper/ledger.py', 'paper/clock_v3.py', 'paper/recovery.py')}))
 
 
 def observation(source, value):
@@ -71,6 +71,8 @@ class Replay:
         self.batches, self.confirmations, self.reservations = {}, {}, {}
         self.positions, self.trades, self.processed, self.candles = {}, {}, {}, {}
         self.accounting = []
+        self.resolutions, self.event_ids = {}, {}
+        self.journal_head = identity
         self.slot = ('EMPTY', None, None)
         self.equity = D('1000')
         self.accounting_head = identity
@@ -100,7 +102,8 @@ class Replay:
                       effective_dispositions=parse(encoded(result['dispositions'])))
         if r:
             confirmation = self.confirmations.get(r['reservation_id'])
-            state = confirmation['status'] if confirmation else 'UNCONFIRMED_ACCEPTANCE'
+            state = ('ABANDONED' if r['reservation_id'] in self.resolutions else
+                     confirmation['status'] if confirmation else 'UNCONFIRMED_ACCEPTANCE')
             result.update(confirmation=confirmation, reservation_state=state)
             for d in result['effective_dispositions']:
                 if d['symbol'] == r['symbol']:
@@ -117,6 +120,8 @@ class Replay:
     def apply(self, kind, data):
         required = {'ACCEPT': {'source', 'accepted_ms', 'equity'},
                     'CONFIRM': {'owner', 'durable_ms', 'elapsed_ns'},
+                    'CONFIRM_V3': {'owner','acceptance','durable','authorization','approval'},
+                    'ABANDON_BLOCKED_CLOCK': {'owner','authorization','approval'},
                     'ENTRY': {'owner', 'candle'}, 'BAR': {'owner', 'candle'}}
         if kind not in required or type(data) is not dict or set(data) != required[kind]:
             raise ValueError('Malformed journal input')
@@ -146,10 +151,19 @@ class Replay:
             return self.result(boundary)
         owner = data['owner']
         r = self.reservations[owner]
-        if kind == 'CONFIRM':
+        if kind == 'ABANDON_BLOCKED_CLOCK':
+            from paper.recovery import apply
+            return apply(self,owner,data['authorization'],data['approval'])
+        if kind in ('CONFIRM','CONFIRM_V3'):
             if owner in self.confirmations or self.slot[1] != owner:
                 raise ValueError('Duplicate or unowned confirmation')
-            confirmation = AcceptanceStore._confirmation(r['reservation'], data['durable_ms'], data['elapsed_ns'])
+            if kind == 'CONFIRM':
+                confirmation = AcceptanceStore._confirmation(r['reservation'], data['durable_ms'], data['elapsed_ns'])
+            else:
+                from paper.clock_v3 import confirmation as confirm_v3, ClockAuthorization
+                auth = ClockAuthorization(encoded(data['authorization']),data['approval'])
+                auth.check(self.binding,r['reservation']['acceptance_ms'])
+                confirmation = confirm_v3(r['reservation'],data['acceptance'],data['durable'])
             if confirmation['status'] == 'PENDING_ENTRY':
                 self._not_before(kind, confirmation['durable_ms'])
             self.confirmations[owner] = confirmation
@@ -231,6 +245,7 @@ class Replay:
             value = canonical(asdict(trade.exit))
             fills.append((owner, 'EXIT', fingerprint(dict(owner=owner, leg='EXIT', fill=value)), dump(value)))
         return dict(
+            resolutions=[(owner,fingerprint(value),dump(value)) for owner,value in self.resolutions.items()],
             reservations=[(owner, r['reservation']['signal_boundary_ms'], r['reservation']['symbol'],
                            r['state'], dump(r['reservation'])) for owner, r in self.reservations.items()],
             positions=[(owner, p.id, dump(p.record)) for owner, p in self.positions.items()],

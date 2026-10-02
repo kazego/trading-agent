@@ -320,7 +320,11 @@ class HistoricalAndFinancialTests(unittest.TestCase):
             'a84880499dafc8f32809641b870827948ebe41845fc6195df59d2758ec006bcd',
             'd7e7a2f461f5060654f13daebb36415d3bd873f1aa9018ae28988f262fdb3b7a',1789171200000,1789977600000)
         v=record('live-0b-001',1790697600000,1790643280990,source,rules)
-        v['implementations'].update(b4=OLD_B4,b5=OLD_B5)
+        # Historical provenance is reconstructed from the committed historical bytes,
+        # not today's version-dispatched confirmation implementation.
+        from clock_historical import historical_identities
+        historical = historical_identities()
+        v['implementations'].update(b3=historical['b3'],b4=OLD_B4,b5=OLD_B5)
         auth=fingerprint(v)
         self.assertEqual(auth,'b513a8397ae2210ec4d83cab6f21004586893b7dec358d4181c2c3d383d2a902')
         binding=AcceptanceBinding(DraftManifest(source,rules_fingerprint=rules.id),ProspectiveGate(v['t0_ms'],auth))

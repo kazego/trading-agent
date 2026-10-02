@@ -21,7 +21,7 @@ CREATE TABLE journal(sequence INTEGER PRIMARY KEY, digest TEXT NOT NULL UNIQUE, 
 CREATE TABLE reservations(owner TEXT PRIMARY KEY, boundary_ms INTEGER NOT NULL UNIQUE,
     symbol TEXT NOT NULL CHECK(symbol IN ('BTCUSDT','ETHUSDT','ADAUSDT')),
     state TEXT NOT NULL CHECK(state IN ('UNCONFIRMED_ACCEPTANCE','PENDING_ENTRY','BLOCKED_CLOCK',
-        'MISSED_ACCEPTANCE_DEADLINE','OPEN','CLOSED','REJECTED_SIZING','REJECTED_EXECUTION')), payload TEXT NOT NULL);
+        'MISSED_ACCEPTANCE_DEADLINE','OPEN','CLOSED','REJECTED_SIZING','REJECTED_EXECUTION','ABANDONED')), payload TEXT NOT NULL);
 CREATE UNIQUE INDEX one_active_exposure ON reservations((1)) WHERE state IN
     ('UNCONFIRMED_ACCEPTANCE','PENDING_ENTRY','BLOCKED_CLOCK','MISSED_ACCEPTANCE_DEADLINE','OPEN');
 CREATE TABLE positions(owner TEXT PRIMARY KEY REFERENCES reservations(owner), digest TEXT NOT NULL UNIQUE, payload TEXT NOT NULL);
@@ -43,6 +43,9 @@ CREATE TABLE account(singleton INTEGER PRIMARY KEY CHECK(singleton=1), amount TE
     financial_available_ms INTEGER CHECK(financial_available_ms IS NULL OR typeof(financial_available_ms)='integer'),
     state_available_ms INTEGER CHECK(state_available_ms IS NULL OR typeof(state_available_ms)='integer'));
 '''
+RESOLUTIONS_SCHEMA = '''CREATE TABLE resolutions(owner TEXT PRIMARY KEY REFERENCES reservations(owner),
+    digest TEXT NOT NULL UNIQUE, payload TEXT NOT NULL);'''
+
 IMMUTABLE = ('identity', 'journal', 'fills', 'candles', 'processed', 'trades', 'equity')
 
 
@@ -157,8 +160,10 @@ class PaperLedger:
         if kind == 'ACCEPT':
             return 'ACCEPT:'+str(data['source']['observation']['boundary_ms'])
         owner = data['owner']
-        if kind == 'CONFIRM':
+        if kind in ('CONFIRM','CONFIRM_V3'):
             return 'CONFIRM:'+owner
+        if kind == 'ABANDON_BLOCKED_CLOCK':
+            return 'ABANDON_BLOCKED_CLOCK:'+owner
         prefix = 'WAIT:' if data['candle'] is None else ''
         if kind == 'ENTRY':
             return prefix+'ENTRY:'+owner
@@ -171,6 +176,8 @@ class PaperLedger:
 
     def _materialize(self, state):
         for table, rows in state.rows().items():
+            if table == 'resolutions' and not rows:
+                continue
             for row in rows:
                 placeholders = ','.join('?' for _ in row)
                 if table == 'reservations':
@@ -187,6 +194,7 @@ class PaperLedger:
                                      f'DO UPDATE SET {updates}', row)
                 else:
                     self._db.execute(f'INSERT OR IGNORE INTO {table} VALUES({placeholders})', row)
+            self._hit('MATERIALIZE.'+table)
 
     def _verify(self):
         if implementation() != getattr(self, '_runtime_identity', self.identity['implementation']):
@@ -197,7 +205,8 @@ class PaperLedger:
         if self._db.execute('SELECT * FROM identity').fetchall() != [
                 (1, self.identity_id, encoded(self.identity).decode())]:
             raise ValueError('Ledger identity changed')
-        expected_triggers = {f'no_{op}_{table}' for table in IMMUTABLE for op in ('UPDATE', 'DELETE')}
+        has_resolutions = self._db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='resolutions'").fetchone() is not None
+        expected_triggers = {f'no_{op}_{table}' for table in IMMUTABLE + (('resolutions',) if has_resolutions else ()) for op in ('UPDATE', 'DELETE')}
         if {r[0] for r in self._db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")} != expected_triggers:
             raise ValueError('Append-only protections changed')
         state = Replay(self.binding, self.rules, self.identity_id)
@@ -215,7 +224,12 @@ class PaperLedger:
             if expected != event or fingerprint(expected) != digest:
                 raise ValueError('Journal financial replay mismatch')
             previous = digest
+            state.journal_head = digest
+            state.event_ids[request] = digest
         for table, expected in state.rows().items():
+            if table == 'resolutions' and not has_resolutions:
+                if expected: raise ValueError('Missing abandonment projection')
+                continue
             actual = self._db.execute(f'SELECT * FROM {table}').fetchall()
             if sorted(actual) != sorted(expected):
                 raise ValueError('Contradictory durable financial state: '+table)
@@ -262,8 +276,12 @@ class PaperLedger:
     def _append(self, kind, data, request):
         self._source_guard()
         self._hit(kind+'.before')
-        self._db.execute('BEGIN IMMEDIATE')
+        # SQLite table rebuild requires FK enforcement off outside the transaction.
+        # The ledger's exclusive lock is held; foreign_key_check runs before commit.
+        migrating = kind == 'ABANDON_BLOCKED_CLOCK'
+        if migrating: self._db.execute('PRAGMA foreign_keys=OFF')
         try:
+            self._db.execute('BEGIN IMMEDIATE')
             state = self._verify()
             row = self._db.execute('SELECT payload FROM journal WHERE request=?', (request,)).fetchone()
             if row:
@@ -281,13 +299,33 @@ class PaperLedger:
             self._db.execute('INSERT INTO journal VALUES(?,?,?,?,?)',
                              (sequence, fingerprint(body), request, parent, encoded(body).decode()))
             self._hit(kind+'.journal')
+            if migrating:
+                sql = self._db.execute("SELECT sql FROM sqlite_master WHERE name='reservations'").fetchone()[0]
+                if "'ABANDONED'" not in sql:
+                    expected = SCHEMA.split('CREATE TABLE reservations',1)[1].split(';',1)[0]
+                    legacy = ('CREATE TABLE reservations'+expected).replace(",'ABANDONED'",'')
+                    if sql != legacy: raise ValueError('Unknown historical reservation schema')
+                    self._db.execute('CREATE TABLE reservations_v3'+expected)
+                    self._db.execute('INSERT INTO reservations_v3 SELECT * FROM reservations')
+                    self._db.execute('DROP TABLE reservations')
+                    self._db.execute('ALTER TABLE reservations_v3 RENAME TO reservations')
+                    self._db.execute("CREATE UNIQUE INDEX one_active_exposure ON reservations((1)) WHERE state IN ('UNCONFIRMED_ACCEPTANCE','PENDING_ENTRY','BLOCKED_CLOCK','MISSED_ACCEPTANCE_DEADLINE','OPEN')")
+                    self._hit(kind+'.reservation_schema')
+            if kind == 'ABANDON_BLOCKED_CLOCK' and not self._db.execute("SELECT 1 FROM sqlite_master WHERE name='resolutions'").fetchone():
+                self._db.execute(RESOLUTIONS_SCHEMA)
+                for op in ('UPDATE','DELETE'):
+                    self._db.execute(f"CREATE TRIGGER no_{op}_resolutions BEFORE {op} ON resolutions BEGIN SELECT RAISE(ABORT,'Append only'); END")
+                self._hit(kind+'.schema')
             self._materialize(state)
             self._hit(kind+'.state')
             self._verify()
+            self._hit(kind+'.before_commit')
             self._db.commit()
         except BaseException:
             self._db.rollback()
             raise
+        finally:
+            if migrating: self._db.execute('PRAGMA foreign_keys=ON')
         self._hit(kind+'.committed')
         return result
 
@@ -337,3 +375,39 @@ class PaperLedger:
             if item is None:
                 request = 'WAIT:'+request
             return self._append('BAR', dict(owner=owner, candle=item.record if item else None), request)
+
+    def accept_v3(self, boundary_ms, *, authorization):
+        """Explicit new-policy entry point. Existing consumer remains v2 until separately deployed."""
+        from paper.clock_v3 import ClockAuthorization, sample, valid_sample
+        if type(authorization) is not ClockAuthorization:
+            raise ValueError('Explicit clock-v3 authorization required')
+        with self._guard():
+            state = self.reconcile()
+            items = self._sources(state)
+            timestamp(boundary_ms)
+            if boundary_ms in state.batches:
+                return state.result(boundary_ms)
+            a = sample()
+            if not valid_sample(a) or a['before_ns'] > a['after_ns'] or a['after_ns']-a['before_ns'] > 5000000:
+                raise ValueError('Invalid pre-acceptance clock bracket')
+            authorization.check(self.binding,a['utc_ms'])
+            result = self._append('ACCEPT',dict(source=items[boundary_ms].record,
+                accepted_ms=a['utc_ms'],equity=state.basis),'ACCEPT:'+str(boundary_ms))
+            if result['reservation']:
+                c = sample()
+                owner = result['reservation']['reservation_id']
+                result = self._append('CONFIRM_V3',dict(owner=owner,acceptance=a,durable=c,
+                    authorization=authorization.record,approval=authorization.approved_fingerprint),'CONFIRM:'+owner)
+            return result
+
+    def abandon_blocked_clock(self, authorization):
+        """Operator-only explicit authorization. Never called by the consumer."""
+        from paper.recovery import RecoveryAuthorization
+        if type(authorization) is not RecoveryAuthorization:
+            raise ValueError('Explicit exact abandonment authorization required')
+        authorization.__post_init__()
+        owner = authorization.record['checkpoint']['owner']
+        with self._guard():
+            return self._append('ABANDON_BLOCKED_CLOCK',dict(owner=owner,
+                authorization=authorization.record,approval=authorization.approved_fingerprint),
+                'ABANDON_BLOCKED_CLOCK:'+owner)
