@@ -3,6 +3,7 @@ import copy
 import unittest
 from unittest.mock import patch
 import test_paper_ledger as b4
+import artifact_fixture as af
 from paper import clock_v3 as v3, recovery
 from paper.model import LABEL
 from research.spec import encoded,fingerprint
@@ -15,21 +16,26 @@ def clock_auth(binding):
     return v3.ClockAuthorization(encoded(r),fingerprint(r))
 
 def make_auth(ledger,owner):
-    state=ledger.reconcile()
-    r=dict(version='paper-abandonment-authorization-v1',label=LABEL,mechanism=fingerprint(recovery.mechanism()),
-        checkpoint=recovery.checkpoint(state,owner),resolved_ms=T+1000000,
-        reason='OPERATOR_AUTHORIZED_NONEXECUTABLE_CLOCK_INCIDENT')
-    return recovery.RecoveryAuthorization(encoded(r),fingerprint(r))
+    return af.recovery_cap(ledger,owner)
 
 class RecoveryTests(unittest.TestCase):
     def setUp(self):
-        self.f=b4.LedgerTests();self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.f=af.BoundLedgerHarness();self.f.setUp();self.addCleanup(self.f.doCleanups)
         with patch('paper.ledger.time.monotonic_ns',side_effect=[0,390000000]):
-            stamps=iter([T+240261,T+240645]);result=self.f.ledger.accept(T,clock=lambda:next(stamps))
+            stamps=iter([T+240261,T+240645]);cap=self.f.ledger.authorization;self.f.ledger.authorization=None
+            try:result=self.f.ledger.accept(T,clock=lambda:next(stamps))
+            finally:self.f.ledger.authorization=cap
         self.owner=result['reservation']['reservation_id']
         self.assertEqual(result['reservation_state'],'BLOCKED_CLOCK')
         self.auth=make_auth(self.f.ledger,self.owner)
         self.original=self.f.ledger._db.execute('SELECT * FROM journal ORDER BY sequence').fetchall()
+
+    def reload_auth(self):
+        from paper.authorization import load_abandonment
+        cap=self.f.ledger.authorization
+        value=load_abandonment(cap.record['run_id'],self.owner,cap.root)
+        self.f.ledger.authorization=value.successor
+        return value
 
     def test_abandonment_atomic_idempotent_restart_no_financial_effect(self):
         value=self.f.ledger.abandon_blocked_clock(self.auth)
@@ -42,7 +48,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.f.ledger._db.execute('SELECT * FROM journal WHERE sequence<=2 ORDER BY sequence').fetchall(),self.original)
         for table in ('positions','fills','trades','equity'):self.assertEqual(self.f.count(table),0)
         self.assertEqual(self.f.count('journal'),3);self.assertEqual(self.f.count('resolutions'),1)
-        self.f.reopen();self.assertEqual(self.f.ledger.abandon_blocked_clock(self.auth),value)
+        self.f.reopen();self.assertEqual(self.f.ledger.abandon_blocked_clock(self.reload_auth()),value)
         self.assertEqual(self.f.count('journal'),3)
         self.assertEqual(self.f.ledger.accept(T,clock=lambda:self.fail('No retrospective acceptance'))['reservation_state'],'ABANDONED')
         self.assertEqual(self.f.ledger._db.execute('SELECT state FROM reservations').fetchone()[0],'ABANDONED')
@@ -94,7 +100,7 @@ class RecoveryTests(unittest.TestCase):
             with self.subTest(point=point):
                 self.f.ledger.fault=lambda p: (_ for _ in ()).throw(b4.Crash()) if p==point else None
                 with self.assertRaises(b4.Crash):self.f.ledger.abandon_blocked_clock(self.auth)
-                self.f.reopen();self.assertEqual(self.f.ledger.reconcile().slot[0],'BLOCKED')
+                self.f.reopen();self.auth=self.reload_auth();self.assertEqual(self.f.ledger.reconcile().slot[0],'BLOCKED')
                 self.assertEqual(self.f.count('journal'),2)
                 self.assertEqual(self.f.ledger._db.execute('SELECT * FROM journal ORDER BY sequence').fetchall(),self.original)
 
@@ -102,17 +108,17 @@ class RecoveryTests(unittest.TestCase):
         self.f.ledger.fault=lambda p: (_ for _ in ()).throw(b4.Crash()) if p=='ABANDON_BLOCKED_CLOCK.committed' else None
         with self.assertRaises(b4.Crash):self.f.ledger.abandon_blocked_clock(self.auth)
         self.f.reopen();self.assertEqual(self.f.ledger.reconcile().slot[0],'EMPTY')
-        self.f.ledger.abandon_blocked_clock(self.auth);self.assertEqual(self.f.count('journal'),3)
+        self.f.ledger.abandon_blocked_clock(self.reload_auth());self.assertEqual(self.f.count('journal'),3)
 
 class V3LedgerTests(unittest.TestCase):
     def setUp(self):
-        self.f=b4.LedgerTests();self.f.setUp();self.addCleanup(self.f.doCleanups)
-        self.auth=clock_auth(self.f.binding)
+        self.f=af.BoundLedgerHarness();self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.auth=self.f.ledger.authorization
 
     def accept(self,a=None,c=None):
         from test_paper_clock_v3 import sample
         a=a or sample(T+240000);c=c or sample(T+240384,390000000)
-        with patch.object(v3,'sample',side_effect=[a,c]):return self.f.ledger.accept_v3(T,authorization=self.auth)
+        with patch.object(v3,'sample',side_effect=[a,c]):return self.f.ledger.accept_v3(T,authorization=self.f.ledger.authorization)
 
     def test_v3_entry_and_financial_path_reuses_b3(self):
         result=self.accept();self.assertEqual(result['reservation_state'],'PENDING_ENTRY')
@@ -122,7 +128,7 @@ class V3LedgerTests(unittest.TestCase):
     def test_confirm_persistence_later_does_not_resample(self):
         result=self.accept();self.f.reopen()
         with patch.object(v3,'sample',side_effect=AssertionError('Must not resample')):
-            self.assertEqual(self.f.ledger.accept_v3(T,authorization=self.auth),result)
+            self.assertEqual(self.f.ledger.accept_v3(T,authorization=self.f.ledger.authorization),result)
 
     def test_timely_sample_survives_confirmation_persistence_after_deadline(self):
         from test_paper_clock_v3 import sample
@@ -146,23 +152,23 @@ class V3LedgerTests(unittest.TestCase):
 
     def test_unsupported_profile_before_accept_has_no_journal_effect(self):
         with patch.object(v3,'verify_runtime',side_effect=ValueError('Unsupported profile')):
-            with self.assertRaises(ValueError):self.f.ledger.accept_v3(T,authorization=self.auth)
+            with self.assertRaises(ValueError):self.f.ledger.accept_v3(T,authorization=self.f.ledger.authorization)
         self.assertEqual(self.f.count('journal'),0)
         self.assertEqual(self.f.count('reservations'),0)
 
     def test_authorization_binding_effective_and_tampering(self):
         for field,value in (('binding','0'*64),('effective_ms',T+500000)):
-            r=self.auth.record;r[field]=value
+            r=self.auth.proposal['clock'];r[field]=value
             a=v3.ClockAuthorization(encoded(r),fingerprint(r))
             with self.assertRaises(ValueError):a.check(self.f.binding,T+240000)
-        with self.assertRaises(ValueError):v3.ClockAuthorization(self.auth.payload,'0'*64)
+        with self.assertRaises(ValueError):v3.ClockAuthorization(encoded(self.auth.proposal['clock']),'0'*64)
 
     def test_crash_between_accept_and_confirm_does_not_upgrade(self):
         self.f.ledger.fault=lambda p: (_ for _ in ()).throw(b4.Crash()) if p=='ACCEPT.committed' else None
         with self.assertRaises(b4.Crash):self.accept()
         self.f.reopen()
         with patch.object(v3,'sample',side_effect=AssertionError('No later confirmation')):
-            r=self.f.ledger.accept_v3(T,authorization=self.auth)
+            r=self.f.ledger.accept_v3(T,authorization=self.f.ledger.authorization)
         self.assertEqual(r['reservation_state'],'UNCONFIRMED_ACCEPTANCE')
 
     def test_late_acceptance_no_reservation(self):
@@ -174,7 +180,7 @@ class V3LedgerTests(unittest.TestCase):
 class HistoricalSchemaTests(unittest.TestCase):
     def fixture(self):
         import paper.ledger as module
-        f=b4.LedgerTests()
+        f=af.BoundLedgerHarness()
         # Build an actual v1 CHECK constraint using the unchanged historical SQL.
         with patch.object(module,'SCHEMA',module.SCHEMA.replace(",'ABANDONED'",'')):
             f.setUp()
@@ -184,7 +190,9 @@ class HistoricalSchemaTests(unittest.TestCase):
     def block(self,f,boundary):
         with patch('paper.ledger.time.monotonic_ns',side_effect=[0,390000000]):
             stamps=iter([boundary+240261,boundary+240645])
-            return f.ledger.accept(boundary,clock=lambda:next(stamps))['reservation']['reservation_id']
+            cap=f.ledger.authorization;f.ledger.authorization=None
+            try:return f.ledger.accept(boundary,clock=lambda:next(stamps))['reservation']['reservation_id']
+            finally:f.ledger.authorization=cap
 
     def test_old_schema_migration_and_following_boundary(self):
         f=self.fixture();owner=self.block(f,T);auth=make_auth(f.ledger,owner)
@@ -216,8 +224,6 @@ class HistoricalSchemaTests(unittest.TestCase):
                    for t in ('fills','trades','equity','positions','identity')}
         boundary=T+14400000;f.items[boundary]=b4.b2.item(boundary=boundary)
         blocked=self.block(f,boundary);a=make_auth(f.ledger,blocked)
-        body=a.record;body['resolved_ms']=boundary+1000000
-        a=recovery.RecoveryAuthorization(encoded(body),fingerprint(body))
         f.ledger.abandon_blocked_clock(a);f.reopen()
         for table,rows in immutable.items():self.assertEqual(f.ledger._db.execute('SELECT * FROM '+table+' ORDER BY 1').fetchall(),rows)
         self.assertEqual(f.ledger.reconcile().equity,prior.equity)

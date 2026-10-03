@@ -173,11 +173,13 @@ class RealVerificationTests(unittest.TestCase):
         import test_paper_settlement as b3
         run='live-0b-b6-real-fixture'
         auth=propose(run,b1.T,self.fixture.source,b3.rules(),now_ms=b1.T-14400000)
-        control,_=paths(run,self.root);control.mkdir(parents=True)
-        exclusive(control/'activation.json',dict(authorization=auth.record,authorization_fingerprint=auth.id))
+        from artifact_fixture import fixture,bind_clock
+        from paper import authorization
+        f=fixture(self.root,run,source=self.fixture.source,t0=b1.T)
+        bind_clock(f,b1.T+14400000)
         original=Store.verify;process=subprocess.run
-        with patch.object(Store,'verify',autospec=True,side_effect=original) as verify,patch('paper.git_batch.subprocess.run',wraps=process) as calls:
-            result=consume(run,root=self.root,clock=lambda:b1.T+400000)
+        with patch.object(authorization,'now_ms',return_value=b1.T+14800000),patch.object(Store,'verify',autospec=True,side_effect=original) as verify,patch('paper.git_batch.subprocess.run',wraps=process) as calls:
+            result=consume(run,root=self.root,clock=lambda:b1.T+14800000)
         self.assertEqual(result['state'],'WAITING');self.assertEqual(calls.call_count,1);self.assertEqual(verify.call_count,1)
         self.assertEqual(calls.call_args.args[0],['git','cat-file','--batch'])
         if os.name=='nt':self.assertEqual(calls.call_args.kwargs['creationflags'],subprocess.CREATE_NO_WINDOW)

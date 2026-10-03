@@ -26,7 +26,7 @@ def implementation():
     root = Path(__file__).resolve().parents[1]
     return fingerprint(dict(version='paper-b4-v1', historical=HISTORICAL, settlement=b3_identity(),
         sources={p: hashlib.sha256((root/p).read_text(encoding='utf-8').encode()).hexdigest()
-                 for p in ('paper/journal.py', 'paper/ledger.py', 'paper/clock_v3.py', 'paper/recovery.py')}))
+                 for p in ('paper/journal.py', 'paper/ledger.py', 'paper/clock_v3.py', 'paper/recovery.py', 'paper/binding.py', 'paper/authorization.py')}))
 
 
 def observation(source, value):
@@ -120,8 +120,8 @@ class Replay:
     def apply(self, kind, data):
         required = {'ACCEPT': {'source', 'accepted_ms', 'equity'},
                     'CONFIRM': {'owner', 'durable_ms', 'elapsed_ns'},
-                    'CONFIRM_V3': {'owner','acceptance','durable','authorization','approval'},
-                    'ABANDON_BLOCKED_CLOCK': {'owner','authorization','approval'},
+                    'CONFIRM_V3': {'owner','acceptance','durable','authorization','approval','binding_evidence'},
+                    'ABANDON_BLOCKED_CLOCK': {'owner','authorization','approval','binding_evidence','successor_evidence'},
                     'ENTRY': {'owner', 'candle'}, 'BAR': {'owner', 'candle'}}
         if kind not in required or type(data) is not dict or set(data) != required[kind]:
             raise ValueError('Malformed journal input')
@@ -153,7 +153,15 @@ class Replay:
         r = self.reservations[owner]
         if kind == 'ABANDON_BLOCKED_CLOCK':
             from paper.recovery import apply
-            return apply(self,owner,data['authorization'],data['approval'])
+            from paper.binding import historical, ABANDONMENT
+            grant=historical(data['binding_evidence']);parent=historical(data['successor_evidence'])
+            if (grant['kind']!=ABANDONMENT or grant['authorization']!=data['authorization']
+                    or grant['successor']!=fingerprint(data['successor_evidence'])
+                    or grant['activation']!=parent['activation'] or parent['clock']['binding']!=self.binding.id):
+                raise ValueError('Historical abandonment binding mismatch')
+            result=apply(self,owner,data['authorization'],data['approval'])
+            result['binding']=data['binding_evidence']
+            return result
         if kind in ('CONFIRM','CONFIRM_V3'):
             if owner in self.confirmations or self.slot[1] != owner:
                 raise ValueError('Duplicate or unowned confirmation')
@@ -161,6 +169,10 @@ class Replay:
                 confirmation = AcceptanceStore._confirmation(r['reservation'], data['durable_ms'], data['elapsed_ns'])
             else:
                 from paper.clock_v3 import confirmation as confirm_v3, ClockAuthorization
+                from paper.binding import historical, SUCCESSOR
+                grant=historical(data['binding_evidence'])
+                if grant['kind']!=SUCCESSOR or grant['clock']!=data['authorization']:
+                    raise ValueError('Historical clock binding mismatch')
                 auth = ClockAuthorization(encoded(data['authorization']),data['approval'])
                 auth.check(self.binding,r['reservation']['acceptance_ms'])
                 confirmation = confirm_v3(r['reservation'],data['acceptance'],data['durable'])

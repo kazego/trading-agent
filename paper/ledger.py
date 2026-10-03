@@ -74,9 +74,15 @@ class PaperLedger:
         provenance = self._runtime_identity
         if authorization is not None:
             from paper.transition import TransitionAuthorization
-            if type(authorization) is not TransitionAuthorization or authorization.binding != binding or authorization.rules != rules:
+            from paper.authorization import ClockCapability
+            if type(authorization) not in (TransitionAuthorization,ClockCapability) or authorization.binding != binding or authorization.rules != rules:
                 raise ValueError('Explicit verified transition authorization required')
             authorization.guard()
+            if type(authorization) is ClockCapability:
+                from paper.operations import paths
+                expected_directory=paths(authorization.record['run_id'],authorization.root)[1]
+                if Path(directory).absolute()!=expected_directory:
+                    raise ValueError('Capability belongs to another ledger directory')
             provenance = authorization.record['implementations']['b4']
         directory = Path(directory).absolute()
         if (directory.resolve() != directory or directory.parent.name != 'forward-paper-execution'
@@ -340,6 +346,8 @@ class PaperLedger:
                 raise ValueError('Wrong source binding')
             if boundary_ms in state.batches:
                 return state.result(boundary_ms)  # Never confirm an interrupted acceptance later.
+            from paper.authorization import ClockCapability
+            if type(self.authorization) is ClockCapability: raise ValueError('Successor requires prospective v3 dispatch')
             start = time.monotonic_ns()
             if type(start) is not int or start < 0:
                 raise ValueError('Invalid monotonic sample')
@@ -377,10 +385,14 @@ class PaperLedger:
             return self._append('BAR', dict(owner=owner, candle=item.record if item else None), request)
 
     def accept_v3(self, boundary_ms, *, authorization):
-        """Explicit new-policy entry point. Existing consumer remains v2 until separately deployed."""
-        from paper.clock_v3 import ClockAuthorization, sample, valid_sample
-        if type(authorization) is not ClockAuthorization:
+        """Prospective entry point requiring a canonical bound successor capability."""
+        from paper.clock_v3 import sample, valid_sample
+        from paper.authorization import ClockCapability
+        if type(authorization) is not ClockCapability:
             raise ValueError('Explicit clock-v3 authorization required')
+        authorization.guard()
+        if authorization.binding!=self.binding or self.authorization is not authorization:
+            raise ValueError('Ledger capability mismatch')
         with self._guard():
             state = self.reconcile()
             items = self._sources(state)
@@ -390,24 +402,28 @@ class PaperLedger:
             a = sample()
             if not valid_sample(a) or a['before_ns'] > a['after_ns'] or a['after_ns']-a['before_ns'] > 5000000:
                 raise ValueError('Invalid pre-acceptance clock bracket')
-            authorization.check(self.binding,a['utc_ms'])
+            authorization.check(self.binding,a['utc_ms'],boundary_ms)
+            if self.authorization is not authorization: raise ValueError('Ledger capability mismatch')
             result = self._append('ACCEPT',dict(source=items[boundary_ms].record,
                 accepted_ms=a['utc_ms'],equity=state.basis),'ACCEPT:'+str(boundary_ms))
             if result['reservation']:
                 c = sample()
                 owner = result['reservation']['reservation_id']
                 result = self._append('CONFIRM_V3',dict(owner=owner,acceptance=a,durable=c,
-                    authorization=authorization.record,approval=authorization.approved_fingerprint),'CONFIRM:'+owner)
+                    authorization=authorization.proposal['clock'],approval=fingerprint(authorization.proposal['clock']),
+                    binding_evidence=authorization.envelope),'CONFIRM:'+owner)
             return result
 
     def abandon_blocked_clock(self, authorization):
         """Operator-only explicit authorization. Never called by the consumer."""
-        from paper.recovery import RecoveryAuthorization
-        if type(authorization) is not RecoveryAuthorization:
+        from paper.authorization import AbandonCapability
+        if type(authorization) is not AbandonCapability:
             raise ValueError('Explicit exact abandonment authorization required')
-        authorization.__post_init__()
+        authorization.guard()
+        if self.authorization is not authorization.successor: raise ValueError('Resolution capability mismatch')
         owner = authorization.record['checkpoint']['owner']
         with self._guard():
             return self._append('ABANDON_BLOCKED_CLOCK',dict(owner=owner,
-                authorization=authorization.record,approval=authorization.approved_fingerprint),
+                authorization=authorization.record,approval=authorization.approved_fingerprint,
+                binding_evidence=authorization.envelope,successor_evidence=authorization.successor.envelope),
                 'ABANDON_BLOCKED_CLOCK:'+owner)

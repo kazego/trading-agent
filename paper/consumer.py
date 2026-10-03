@@ -4,14 +4,14 @@ import subprocess
 import time
 from pathlib import Path
 
-from paper.operations import ROOT, load, paths, exclusive, policy
+from paper.operations import ROOT, paths, exclusive, policy
 from paper.model import LABEL
 from paper.source import SourceAdapter
 from paper.market import CandleSource
 from paper.ledger import PaperLedger
 from paper.journal import source_available
 from paper.verified_source import capture
-from paper.transition import TransitionAuthorization
+from paper.authorization import load_execution
 from research.spec import encoded, fingerprint
 from runtime import DatabaseLock
 
@@ -50,7 +50,7 @@ def consume(run_id, *, root=ROOT, clock=utc_ms):
     db=None; ledger=None; invocation=None
     try:
         if (control/'BLOCKED.json').exists(): raise ValueError('Consumer is BLOCKED')
-        auth=load(run_id,root)
+        auth=load_execution(run_id,root)
         started=clock()
         if started<auth.record['t0_ms']:
             return dict(label=LABEL,state='WAITING_FOR_T0')
@@ -83,12 +83,11 @@ def consume(run_id, *, root=ROOT, clock=utc_ms):
             if item.boundary_ms!=expected: raise ValueError('Missing prospective source boundary')
             expected+=14400000
         ledger=PaperLedger(ledger_path,auth.binding,auth.rules,source,market,
-            verified_source=verified,authorization=auth if type(auth) is TransitionAuthorization else None)
+            verified_source=verified,authorization=auth.ledger_authorization)
         state=ledger.reconcile(); ledger._sources(state)
         count=0
         def authorization_guard():
-            if load(run_id,root).payload != auth.payload:
-                raise ValueError('Activation changed during invocation')
+            auth.guard()
         def budget():
             return count<policy()['max_transitions'] and time.monotonic()-start_mono<policy()['max_runtime_seconds']
         def drain(before):
@@ -120,13 +119,13 @@ def consume(run_id, *, root=ROOT, clock=utc_ms):
             if not budget() or not drain(item.boundary_ms): break
             if source_available(item.record)>=clock(): break
             authorization_guard()
-            ledger.accept(item.boundary_ms,clock=clock)
+            auth.accept(ledger,item.boundary_ms)
             count+=1; state=ledger.reconcile()
         else:
             drain(clock()//900000*900000)
         verified.guard()
         # Revalidate immutable consumer authorization and source bytes before exit.
-        if load(run_id,root).payload != auth.payload: raise ValueError('Activation changed during invocation')
+        auth.guard()
         finished=clock()
         if finished<started: raise ValueError('Consumer clock regressed')
         health='BUDGET_REACHED' if not budget() else ('WAITING' if not count else 'HEALTHY')

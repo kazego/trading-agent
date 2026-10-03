@@ -27,7 +27,7 @@ def policy():
 
 def implementation():
     paths=('paper/operations.py','paper/consumer.py','paper/readout.py','paper/__main__.py',
-           'scripts/live0b-task.ps1','paper/git_batch.py','paper/verified_source.py','paper/transition.py')
+           'scripts/live0b-task.ps1','paper/git_batch.py','paper/verified_source.py','paper/transition.py','paper/binding.py','paper/authorization.py','paper_admin.py')
     return fingerprint(dict(version='paper-b5-implementation-v1', b4=b4(), policy=policy(),
         sources={p:hashlib.sha256((ROOT/p).read_text(encoding='utf-8').encode()).hexdigest() for p in paths}))
 
@@ -122,6 +122,9 @@ def load(run_id, root=ROOT):
         raise ValueError('Malformed activation envelope')
     if fingerprint(envelope['authorization'])!=envelope['authorization_fingerprint']:
         raise ValueError('Activation fingerprint mismatch')
+    if (control/'authorizations'/'clock-v3-successor-v1.json').exists():
+        from paper.authorization import load_execution
+        return load_execution(run_id,root)
     if (control/'transition-b6-v1.json').exists():
         from paper.transition import load_transition
         return load_transition(run_id, root, raw)

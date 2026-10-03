@@ -85,7 +85,7 @@ def confirmation(reservation, acceptance, durable):
 
 @dataclass(frozen=True)
 class ClockAuthorization:
-    """Explicit approval capability. No writer, CLI, consumer default or live binding."""
+    """Historical clock record only; cannot authorize a ledger execution."""
     payload: bytes
     approved_fingerprint: str
 
@@ -93,7 +93,8 @@ class ClockAuthorization:
         r = parse(self.payload)
         if (set(r) != {'version','label','binding','effective_ms','policy','implementation'}
                 or r['version'] != 'paper-clock-v3-authorization-v1' or r['label'] != LABEL
-                or r['policy'] != fingerprint(policy()) or r['implementation'] != implementation()
+                or r['policy'] != fingerprint(policy())
+                or type(r['implementation']) is not str or len(r['implementation']) != 64
                 or type(r['binding']) is not str or len(r['binding']) != 64
                 or any(ch not in '0123456789abcdef' for ch in r['binding'])
                 or encoded(r) != self.payload or fingerprint(r) != self.approved_fingerprint):

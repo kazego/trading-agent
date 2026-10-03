@@ -34,6 +34,20 @@ class OperationsTests(unittest.TestCase):
         self.auth=propose(self.run,T-14400000,b1.identity(),b3.rules(),now_ms=T-28800000)
         self.now=T+240000; self.items=[b2.item()]; self.candles={}
         self.addCleanup(patch.stopall)
+        # These retained B5 financial fixtures deliberately exercise historical v2.
+        # The production entry point has no fallback; new bound-loader integration
+        # is covered separately by test_artifact_binding.
+        class HistoricalFixtureCapability:
+            def __init__(inner,auth):inner.auth=auth
+            def __getattr__(inner,name):return getattr(inner.auth,name)
+            @property
+            def ledger_authorization(inner):
+                from paper.transition import TransitionAuthorization
+                return inner.auth if type(inner.auth) is TransitionAuthorization else None
+            def guard(inner):
+                if load(self.run,self.root).payload!=inner.auth.payload:raise ValueError('Changed fixture activation')
+            def accept(inner,ledger,boundary):return ledger.accept(boundary,clock=lambda:self.now)
+        patch('paper.consumer.load_execution',side_effect=lambda run,root:HistoricalFixtureCapability(load(run,root))).start()
         patch.object(SourceAdapter,'snapshot',side_effect=lambda:tuple(self.items)).start()
         patch.object(CandleSource,'at',side_effect=lambda s,t:self.candles.get((s,t))).start()
         from paper.consumer import source_progress

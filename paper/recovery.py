@@ -35,7 +35,7 @@ class RecoveryAuthorization:
         r = parse(self.payload)
         if (set(r) != {'version','label','mechanism','checkpoint','resolved_ms','reason'}
                 or r['version'] != 'paper-abandonment-authorization-v1' or r['label'] != LABEL
-                or r['mechanism'] != fingerprint(mechanism())
+                or type(r['mechanism']) is not str or len(r['mechanism']) != 64
                 or r['reason'] != 'OPERATOR_AUTHORIZED_NONEXECUTABLE_CLOCK_INCIDENT'
                 or self.payload != encoded(r) or fingerprint(r) != self.approved_fingerprint):
             raise ValueError('Exact explicit abandonment approval required')

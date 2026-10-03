@@ -45,7 +45,8 @@ def report(run_id, command, *, root=ROOT, now_ms):
         from paper.journal import implementation,HISTORICAL
         from research.spec import fingerprint
         from paper.transition import TransitionAuthorization
-        provenance=auth.record['implementations']['b4'] if type(auth) is TransitionAuthorization else implementation()
+        from paper.authorization import ClockCapability
+        provenance=auth.record['implementations']['b4'] if type(auth) in (TransitionAuthorization,ClockCapability) else implementation()
         expected=dict(label=LABEL,version='paper-b4-ledger-v1',implementation=provenance,
             historical=HISTORICAL,binding=auth.binding.record,rules=auth.rules.record,
             activation='UNSET_FOUNDATION_ONLY',initial_equity='1000',
