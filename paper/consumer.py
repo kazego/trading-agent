@@ -2,6 +2,7 @@
 import sqlite3
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from paper.operations import ROOT, paths, exclusive, policy
@@ -11,12 +12,39 @@ from paper.market import CandleSource
 from paper.ledger import PaperLedger
 from paper.journal import source_available
 from paper.verified_source import capture
-from paper.authorization import load_execution
+from paper.authorization import prepare_execution
 from research.spec import encoded, fingerprint
 from runtime import DatabaseLock
 
 
 def utc_ms(): return time.time_ns()//1000000
+
+
+class StageTimings:
+    """Invocation-local diagnostics, never an authorization or state cache.
+
+    Values returned to the caller only; no diagnostic file/database writes.
+    Total ends before finally closes handles/releases locks; cleanup is excluded.
+    Invocation registration/final operations commit are in unattributed_seconds.
+    Outer stage times include their SQLite reads/commits and nested verification.
+    They are wall times, not CPU time. No clock/deadline semantics use them.
+    """
+    def __init__(self, start, clock=None):
+        self.clock=clock or time.monotonic
+        self.start=start;self.stages={};self.counts={}
+
+    @contextmanager
+    def measure(self, name):
+        start=self.clock()
+        try:yield
+        finally:
+            self.stages[name]=self.stages.get(name,0)+self.clock()-start
+            self.counts[name]=self.counts.get(name,0)+1
+
+    def report(self):
+        total=self.clock()-self.start
+        return dict(total_seconds=total,stage_seconds=dict(self.stages),
+                    stage_calls=dict(self.counts),unattributed_seconds=total-sum(self.stages.values()))
 
 
 def source_progress(source):
@@ -34,8 +62,37 @@ def source_progress(source):
     return result
 
 
+def _drain_position(ledger, verified, progress, state, before, *, clock, budget,
+                    authorization_guard, timings, committed):
+    """Shared causal position loop; backend selection remains with the caller."""
+    while state.slot[0] in ('PENDING','OPEN') and budget():
+        owner=state.slot[1];reservation=state.reservations[owner]
+        if reservation['state']!='PENDING_ENTRY' and state.slot[0]=='PENDING':break
+        r=reservation['reservation']
+        if state.slot[0]=='PENDING':stamp=r['entry_boundary_ms']
+        else:
+            p=state.positions[owner]
+            stamp=p.entry.candle_open_time_ms if p.last_processed_ms is None else p.last_processed_ms+900000
+        if stamp>=before:return state,True
+        item=verified.at(r['symbol'],stamp)
+        if item is None:
+            last=progress[r['symbol']]['last_open_ms']
+            if last is not None and last>=stamp:raise ValueError('Missing execution candle')
+            return state,True
+        if item.received_ms>clock():raise ValueError('Source receipt is in the future')
+        authorization_guard()
+        with timings.measure('transition_including_replay_materialize_commit'):
+            if state.slot[0]=='PENDING':ledger.settle_entry(owner)
+            else:ledger.process_candle(owner,stamp)
+        committed()
+        with timings.measure('post_transition_reconcile'):
+            state=ledger.reconcile()
+    return state,budget()
+
+
 def consume(run_id, *, root=ROOT, clock=utc_ms):
     start_mono=time.monotonic()  # Budget includes authorization and source verification.
+    timings=StageTimings(start_mono)
     # Missing authorization must not create even an empty operational directory.
     root=Path(root)
     control,ledger_path=paths(run_id,root)
@@ -50,7 +107,8 @@ def consume(run_id, *, root=ROOT, clock=utc_ms):
     db=None; ledger=None; invocation=None
     try:
         if (control/'BLOCKED.json').exists(): raise ValueError('Consumer is BLOCKED')
-        auth=load_execution(run_id,root)
+        with timings.measure('authorization_before_started_ms'):
+            auth=prepare_execution(run_id,root)
         started=clock()
         if started<auth.record['t0_ms']:
             return dict(label=LABEL,state='WAITING_FOR_T0')
@@ -71,8 +129,9 @@ def consume(run_id, *, root=ROOT, clock=utc_ms):
         source_path=root/'artifacts'/'forward-paper'/'live-0a-001'
         source=SourceAdapter(source_path,auth.source)
         market=CandleSource(source_path,auth.source)
-        verified=capture(source_path,auth.source,timeout=max(0.001,min(15,
-            policy()['max_runtime_seconds']-(time.monotonic()-start_mono))))
+        with timings.measure('source_capture'):
+            verified=capture(source_path,auth.source,timeout=max(0.001,min(15,
+                policy()['max_runtime_seconds']-(time.monotonic()-start_mono))))
         items=verified.snapshot()
         progress=verified.progress
         boundaries=[o.boundary_ms for o in items]
@@ -82,50 +141,42 @@ def consume(run_id, *, root=ROOT, clock=utc_ms):
         for item in eligible:
             if item.boundary_ms!=expected: raise ValueError('Missing prospective source boundary')
             expected+=14400000
-        ledger=PaperLedger(ledger_path,auth.binding,auth.rules,source,market,
-            verified_source=verified,authorization=auth.ledger_authorization)
-        state=ledger.reconcile(); ledger._sources(state)
+        with timings.measure('ledger_open_and_reconcile'):
+            auth,ledger=auth.open(verified)
+        with timings.measure('initial_reconcile'):
+            state=ledger.reconcile()
+        with timings.measure('ledger_source_check'):
+            ledger._sources(state)
         count=0
         def authorization_guard():
-            auth.guard()
+            with timings.measure('authorization_guard'):
+                auth.guard()
         def budget():
             return count<policy()['max_transitions'] and time.monotonic()-start_mono<policy()['max_runtime_seconds']
         def drain(before):
             nonlocal state,count
-            while state.slot[0] in ('PENDING','OPEN') and budget():
-                owner=state.slot[1]; reservation=state.reservations[owner]
-                if reservation['state']!='PENDING_ENTRY' and state.slot[0]=='PENDING': break
-                r=reservation['reservation']
-                if state.slot[0]=='PENDING': stamp=r['entry_boundary_ms']
-                else:
-                    p=state.positions[owner]
-                    stamp=p.entry.candle_open_time_ms if p.last_processed_ms is None else p.last_processed_ms+900000
-                if stamp>=before: return True
-                item=verified.at(r['symbol'],stamp)
-                if item is None:
-                    # A later existing candle proves a gap; never skip it.
-                    last=progress[r['symbol']]['last_open_ms']
-                    if last is not None and last>=stamp:
-                        raise ValueError('Missing execution candle')
-                    return True
-                if item.received_ms>clock(): raise ValueError('Source receipt is in the future')
-                authorization_guard()
-                if state.slot[0]=='PENDING': ledger.settle_entry(owner)
-                else: ledger.process_candle(owner,stamp)
-                count+=1; state=ledger.reconcile()
-            return budget()
+            def committed():
+                nonlocal count
+                count+=1
+            state,within_budget=_drain_position(ledger,verified,progress,state,before,clock=clock,
+                budget=budget,authorization_guard=authorization_guard,timings=timings,committed=committed)
+            return within_budget
         for item in eligible:
             if item.boundary_ms in state.batches: continue
             if not budget() or not drain(item.boundary_ms): break
             if source_available(item.record)>=clock(): break
             authorization_guard()
-            auth.accept(ledger,item.boundary_ms)
-            count+=1; state=ledger.reconcile()
+            with timings.measure('accept_including_replay_materialize_commit'):
+                auth.accept(ledger,item.boundary_ms)
+            count+=1
+            with timings.measure('post_transition_reconcile'):
+                state=ledger.reconcile()
         else:
             drain(clock()//900000*900000)
-        verified.guard()
+        with timings.measure('final_source_guard'):
+            verified.guard()
         # Revalidate immutable consumer authorization and source bytes before exit.
-        auth.guard()
+        authorization_guard()
         finished=clock()
         if finished<started: raise ValueError('Consumer clock regressed')
         health='BUDGET_REACHED' if not budget() else ('WAITING' if not count else 'HEALTHY')
@@ -134,14 +185,18 @@ def consume(run_id, *, root=ROOT, clock=utc_ms):
         latest=boundaries[-1] if boundaries else None
         db.execute('UPDATE invocations SET finished_ms=?,state=?,source_boundary_ms=?,transitions=?,source_progress=? WHERE sequence=?',
                    (finished,health,latest,count,encoded(progress).decode(),invocation)); db.commit()
-        return dict(label=LABEL,state=health,transitions=count,source_boundary_ms=latest)
+        return dict(label=LABEL,state=health,transitions=count,source_boundary_ms=latest,
+                    budget_reason=('TRANSITION_LIMIT' if count>=policy()['max_transitions'] else 'TOTAL_RUNTIME') if health=='BUDGET_REACHED' else None,
+                    verification=dict(getattr(ledger,'_verification_stats',{})),
+                    timings=timings.report())
     except subprocess.TimeoutExpired:
         # Bounded historical read exhausted its allowance; no unverified evidence
         # is executable. This is not evidence corruption and does not clear latches.
         if db is not None and invocation is not None:
             db.rollback()
             db.execute("UPDATE invocations SET finished_ms=?,state='BUDGET_REACHED' WHERE sequence=?",(clock(),invocation));db.commit()
-        return dict(label=LABEL,state='BUDGET_REACHED',transitions=0)
+        return dict(label=LABEL,state='BUDGET_REACHED',transitions=0,
+                    budget_reason='SUBPROCESS_TIMEOUT',timings=timings.report())
     except Exception:
         # Never repair/release exposure; B4 owns financial durability.
         if control.exists():

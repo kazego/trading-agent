@@ -57,3 +57,5 @@ artifacts/forward-paper/
 # Separate LIVE-0B draft/evidence storage (never LIVE-0A's namespace)
 artifacts/forward-paper-execution/
 artifacts/forward-paper-consumer/
+
+/artifacts/forward-paper-review/

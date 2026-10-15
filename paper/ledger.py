@@ -1,5 +1,6 @@
 """B4 local durable transitions. Explicit calls only; no worker or activation."""
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 import os
 import sqlite3
@@ -54,7 +55,9 @@ class LedgerBlocked(ValueError):
 
 
 class PaperLedger:
-    def __init__(self, directory, binding, rules, source, market, *, fault=None, verified_source=None, authorization=None):
+    def __init__(self, directory, binding, rules, source, market, *, fault=None, verified_source=None, authorization=None,
+                 invocation_reuse=False, checkpoints=()):
+        self._required_checkpoints=deepcopy(tuple(checkpoints))
         if (type(binding) is not AcceptanceBinding or type(rules) is not RuleSnapshot
                 or binding.draft.rules_fingerprint != rules.id
                 or type(source) is not SourceAdapter or type(market) is not CandleSource
@@ -117,6 +120,10 @@ class PaperLedger:
                                  (self.identity_id, encoded(self.identity).decode()))
                 self._materialize(Replay(binding, rules, self.identity_id))
                 self._db.commit()
+            if invocation_reuse:
+                if verified_source is None or authorization is None:
+                    raise ValueError('Invocation reuse requires bound authorization and detached source')
+                self._enable_invocation_reuse()
             self.reconcile()
         except Exception as error:
             try:
@@ -126,6 +133,7 @@ class PaperLedger:
             raise
 
     def close(self):
+        self._invalidate_verified()
         if hasattr(self, '_db'):
             self._db.close()
         self._lock.release()
@@ -151,11 +159,73 @@ class PaperLedger:
         try:
             yield
         except Exception as error:
+            self._invalidate_verified()
             try:
                 self._db.rollback()
             finally:
                 self._block(error)
             raise
+
+    def _invalidate_verified(self):
+        self.__verified=None
+        self._verification_generation=getattr(self,'_verification_generation',0)+1
+
+    def _enable_invocation_reuse(self):
+        """Private connection-local cache. Never serialized or shared with callers.
+
+        Reuse is checked UNDER BEGIN IMMEDIATE: no competing writer can intervene.
+        data_version detects commits by other connections since the verified read;
+        total_changes and the trace generation detect this connection's writes,
+        commits/rollbacks/DDL, even writes subsequently rolled back. An unexpected
+        statement invalidates conservatively. Raw connection callback replacement
+        or arbitrary private-attribute tampering is outside the runtime API.
+        """
+        if self._db.in_transaction:raise ValueError('Reuse must start outside a transaction')
+        self._reuse=True;self._verification_stats={'full_passes':0,'full_seconds':0.0,'reuse_hits':0}
+        self._invalidate_verified()
+        def trace(sql):
+            head=sql.strip().upper()
+            safe=(head.startswith('SELECT ') or head=='BEGIN IMMEDIATE' or
+                  head in ('PRAGMA DATA_VERSION','PRAGMA DATABASE_LIST'))
+            if not safe:self._invalidate_verified()
+        self._db.set_trace_callback(trace)
+
+    def _verification_key(self):
+        if not self._db.in_transaction:raise ValueError('Verified state requires a live transaction')
+        self._source_guard()
+        return (id(self._db),self.identity_id,self.binding.id,self.rules.id,
+                fingerprint(self.identity),fingerprint(getattr(self,'_required_checkpoints',())),
+                implementation(),getattr(self.authorization,'bound_id',None) if getattr(self,'authorization',None) else None,
+                self.verified_source.id if getattr(self,'verified_source',None) else None,
+                tuple(self._db.execute('PRAGMA database_list').fetchall()),
+                tuple(self._db.execute('SELECT count(*),max(sequence) FROM journal').fetchone()),
+                tuple(self._db.execute('SELECT digest FROM journal ORDER BY sequence DESC LIMIT 1').fetchall()),
+                self._db.execute('PRAGMA data_version').fetchone()[0],self._db.total_changes,
+                self._verification_generation)
+
+    def _verified_state(self):
+        if not getattr(self,'_reuse',False):return self._verify()
+        try:
+            key=self._verification_key()
+            saved=self.__verified
+            if saved is not None and saved[0]==key:
+                self._verification_stats['reuse_hits']+=1
+                return deepcopy(saved[1])
+            self._invalidate_verified()
+            return self._verify()
+        except BaseException:
+            self._invalidate_verified();raise
+
+    def _commit_verified(self,state):
+        """Publish only AFTER successful commit; detect intervening external commit.
+
+        The data_version baseline is sampled before commit, never after a gap in
+        ownership. Next reuse acquires BEGIN IMMEDIATE before comparing it.
+        """
+        if not getattr(self,'_reuse',False):self._db.commit();return
+        key=self._verification_key();copy=deepcopy(state)
+        self._db.commit()  # trace invalidates the old generation
+        self.__verified=(key[:-1]+(self._verification_generation,),copy)
 
     def _hit(self, point):
         if self.fault is not None:
@@ -202,7 +272,15 @@ class PaperLedger:
                     self._db.execute(f'INSERT OR IGNORE INTO {table} VALUES({placeholders})', row)
             self._hit('MATERIALIZE.'+table)
 
-    def _verify(self):
+    def _verify(self, *, checkpoints=None):
+        start=time.monotonic()
+        try:return self._verify_body(checkpoints=checkpoints)
+        finally:
+            if hasattr(self,'_verification_stats'):
+                self._verification_stats['full_passes']+=1
+                self._verification_stats['full_seconds']+=time.monotonic()-start
+
+    def _verify_body(self, *, checkpoints=None):
         if implementation() != getattr(self, '_runtime_identity', self.identity['implementation']):
             raise ValueError('B4 implementation changed while ledger was open')
         if (self._db.execute('PRAGMA integrity_check').fetchone() != ('ok',)
@@ -216,6 +294,17 @@ class PaperLedger:
         if {r[0] for r in self._db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")} != expected_triggers:
             raise ValueError('Append-only protections changed')
         state = Replay(self.binding, self.rules, self.identity_id)
+        checkpoints=tuple(getattr(self,'_required_checkpoints',()) if checkpoints is None else checkpoints)
+        lengths=[cp['journal_count'] for cp in checkpoints]
+        if any(type(n) is not int or n<0 for n in lengths):raise ValueError('Invalid checkpoint length')
+        prefixes={};verified_rows=[]
+        def capture_prefix(n):
+            if n not in lengths:return
+            projections=state.rows()
+            prefixes[n]=parse(encoded(dict(genesis=self.identity_id,identity=encoded(self.identity).decode(),
+                journal_count=n,journal_fingerprint=fingerprint(verified_rows),
+                account=projections['account'],slot=projections['global_slot'])))
+        capture_prefix(0)
         previous = self.identity_id
         for index, row in enumerate(self._db.execute('SELECT * FROM journal ORDER BY sequence'), 1):
             sequence, digest, request, parent, raw = row
@@ -232,6 +321,7 @@ class PaperLedger:
             previous = digest
             state.journal_head = digest
             state.event_ids[request] = digest
+            verified_rows.append(list(row));capture_prefix(index)
         for table, expected in state.rows().items():
             if table == 'resolutions' and not has_resolutions:
                 if expected: raise ValueError('Missing abandonment projection')
@@ -239,16 +329,21 @@ class PaperLedger:
             actual = self._db.execute(f'SELECT * FROM {table}').fetchall()
             if sorted(actual) != sorted(expected):
                 raise ValueError('Contradictory durable financial state: '+table)
+        if any(prefixes.get(cp['journal_count'])!=cp for cp in checkpoints):
+            raise ValueError('Bound historical checkpoint mismatch')
         return state
 
     def reconcile(self):
         with self._guard():
-            self._db.execute('BEGIN')
+            reuse=getattr(self,'_reuse',False)
+            self._db.execute('BEGIN IMMEDIATE' if reuse else 'BEGIN')
             try:
-                state = self._verify()
-                self._db.rollback()
+                state = self._verified_state()
+                if reuse:self._commit_verified(state)
+                else:self._db.rollback()
                 return state
             except BaseException:
+                self._invalidate_verified()
                 self._db.rollback()
                 raise
 
@@ -279,7 +374,7 @@ class PaperLedger:
                 raise ValueError('Previously consumed source candle changed')
         return items
 
-    def _append(self, kind, data, request):
+    def _append(self, kind, data, request, *, bar_open_ms=None):
         self._source_guard()
         self._hit(kind+'.before')
         # SQLite table rebuild requires FK enforcement off outside the transaction.
@@ -288,7 +383,26 @@ class PaperLedger:
         if migrating: self._db.execute('PRAGMA foreign_keys=OFF')
         try:
             self._db.execute('BEGIN IMMEDIATE')
-            state = self._verify()
+            state = self._verified_state()
+            if bar_open_ms is not None:
+                # Derive the next BAR from this transaction's verified state,
+                # not a replay from an earlier read transaction. No state cache
+                # or caller-supplied verification token crosses this boundary.
+                if kind != 'BAR' or request is not None or set(data) != {'owner'}:
+                    raise ValueError('Invalid transactional BAR request')
+                timestamp(bar_open_ms)
+                self._sources(state)
+                owner = data['owner']
+                r = state.reservations[owner]['reservation']
+                item = self._candle(r['symbol'], bar_open_ms)
+                position = state.positions[owner]
+                expected = position.last_processed_ms+900000 if position.last_processed_ms is not None else r['entry_boundary_ms']
+                request = 'BAR:'+owner+':'+str(bar_open_ms)
+                if self._db.execute('SELECT 1 FROM journal WHERE request=?', (request,)).fetchone() is None and bar_open_ms != expected:
+                    raise ValueError('Must process exact next candle')
+                if item is None:
+                    request = 'WAIT:'+request
+                data = dict(owner=owner, candle=item.record if item else None)
             row = self._db.execute('SELECT payload FROM journal WHERE request=?', (request,)).fetchone()
             if row:
                 old = parse(row[0].encode())
@@ -298,6 +412,7 @@ class PaperLedger:
                 return old['result']
             if request != self._request(state, kind, data):
                 raise ValueError('Incorrect transition request')
+            self._invalidate_verified()
             result = state.apply(kind, data)
             tail = self._db.execute('SELECT sequence,digest FROM journal ORDER BY sequence DESC LIMIT 1').fetchone()
             sequence, parent = (tail[0]+1, tail[1]) if tail else (1, self.identity_id)
@@ -324,10 +439,14 @@ class PaperLedger:
                 self._hit(kind+'.schema')
             self._materialize(state)
             self._hit(kind+'.state')
-            self._verify()
+            verified_post = self._verify()
             self._hit(kind+'.before_commit')
-            self._db.commit()
+            # Fault hooks may not alter the post-verified database silently.
+            # Production has no fault hook; tests use it only for crash injection.
+            if self.fault is not None:verified_post=self._verify()
+            self._commit_verified(verified_post)
         except BaseException:
+            self._invalidate_verified()
             self._db.rollback()
             raise
         finally:
@@ -372,17 +491,7 @@ class PaperLedger:
     def process_candle(self, owner, open_ms):
         with self._guard():
             timestamp(open_ms)
-            state = self.reconcile(); self._sources(state)
-            r = state.reservations[owner]['reservation']
-            item = self._candle(r['symbol'], open_ms)
-            position = state.positions[owner]
-            expected = position.last_processed_ms+900000 if position.last_processed_ms is not None else r['entry_boundary_ms']
-            request = 'BAR:'+owner+':'+str(open_ms)
-            if self._db.execute('SELECT 1 FROM journal WHERE request=?', (request,)).fetchone() is None and open_ms != expected:
-                raise ValueError('Must process exact next candle')
-            if item is None:
-                request = 'WAIT:'+request
-            return self._append('BAR', dict(owner=owner, candle=item.record if item else None), request)
+            return self._append('BAR', dict(owner=owner), None, bar_open_ms=open_ms)
 
     def accept_v3(self, boundary_ms, *, authorization):
         """Prospective entry point requiring a canonical bound successor capability."""

@@ -47,7 +47,14 @@ class OperationsTests(unittest.TestCase):
             def guard(inner):
                 if load(self.run,self.root).payload!=inner.auth.payload:raise ValueError('Changed fixture activation')
             def accept(inner,ledger,boundary):return ledger.accept(boundary,clock=lambda:self.now)
-        patch('paper.consumer.load_execution',side_effect=lambda run,root:HistoricalFixtureCapability(load(run,root))).start()
+            def open(inner,verified):
+                from paper.ledger import PaperLedger
+                _,directory=paths(self.run,self.root)
+                ledger=PaperLedger(directory,inner.binding,inner.rules,
+                    SourceAdapter(self.source_dir,inner.source),CandleSource(self.source_dir,inner.source),
+                    verified_source=verified,authorization=inner.ledger_authorization)
+                return inner,ledger
+        patch('paper.consumer.prepare_execution',side_effect=lambda run,root:HistoricalFixtureCapability(load(run,root))).start()
         patch.object(SourceAdapter,'snapshot',side_effect=lambda:tuple(self.items)).start()
         patch.object(CandleSource,'at',side_effect=lambda s,t:self.candles.get((s,t))).start()
         from paper.consumer import source_progress

@@ -58,7 +58,7 @@ def _historical_auth(v):
     a=object.__new__(Authorization);object.__setattr__(a,'payload',encoded(v));return a
 
 
-def state_at(run_id,root,v, *, count=None):
+def state_at(run_id,root,v, *, count=None, checkpoints=None):
     """Full read-only B4 reconciliation; optional verified prefix for a checkpoint."""
     from paper.ledger import PaperLedger
     from paper.journal import Replay,HISTORICAL,implementation as ledger_id
@@ -75,7 +75,8 @@ def state_at(run_id,root,v, *, count=None):
         if value!=expected or fingerprint(value)!=genesis:raise ValueError('Genesis ancestry mismatch')
         verifier=object.__new__(PaperLedger);verifier._db=db;verifier.identity=value;verifier.identity_id=genesis
         verifier.binding=auth.binding;verifier.rules=auth.rules;verifier._runtime_identity=ledger_id()
-        state=verifier._verify()
+        if checkpoints is not None and count is not None:raise ValueError('Ambiguous checkpoint request')
+        state=verifier._verify(checkpoints=checkpoints)
         rows=[list(r) for r in db.execute('SELECT * FROM journal ORDER BY sequence')]
         if count is not None:
             if type(count) is not int or count<0 or count>len(rows):raise ValueError('Invalid checkpoint length')
@@ -143,14 +144,70 @@ def _issue(cls,**fields):
     return value
 
 
-def load_execution(run_id, root=None):
-    from paper.operations import ROOT
-    root=Path(ROOT if root is None else root).resolve()
+def _read_successor(run_id, root):
     v,t,current,a_raw,t_raw=chain(run_id,root)
     _,path=b.locations(run_id,root,b.SUCCESSOR);e,raw=b.read(path)
     p=b.historical(e);verify_successor(p,v,t,current)
     if now_ms()<p['effective_ms']:raise ValueError('Successor not effective')
-    check_prefix(run_id,root,v,t['checkpoint']);check_prefix(run_id,root,v,p['checkpoint'])
+    return v,t,p,a_raw,t_raw,raw
+
+
+@dataclass(frozen=True,init=False)
+class ExecutionPlan:
+    """Verified metadata only. No accept/check/guard execution capability.
+
+    The capability is returned only after the ledger has verified both prefixes
+    and all financial state in its invocation-local SQLite transaction.
+    """
+    root: Path
+    run_id: str
+    payload: bytes
+    ancestry: tuple
+    _seal: object
+    _used: bool
+
+    def __init__(self,*args,**kwargs):raise TypeError('Use prepare_execution with a run identity')
+    @property
+    def record(self):return parse(self.payload)
+    @property
+    def source(self):return source_from(self.record['source'])
+
+    def open(self,verified_source):
+        from paper.ledger import PaperLedger
+        from paper.source import SourceAdapter
+        from paper.market import CandleSource
+        if self._seal is not _SEAL or self._used:raise ValueError('Invalid or consumed execution plan')
+        object.__setattr__(self,'_used',True)
+        v,t,p,a_raw,t_raw,raw=_read_successor(self.run_id,self.root)
+        if encoded(v)!=self.payload or (a_raw,t_raw,raw)!=self.ancestry:
+            raise ValueError('Authorization changed before ledger verification')
+        _,directory=paths(self.run_id,self.root)
+        if not (directory/'paper.sqlite').is_file():raise ValueError('Invocation requires existing authorized ledger')
+        cap=_issue(ClockCapability,payload=encoded(v),root=self.root,envelope_bytes=raw,
+                   activation_bytes=a_raw,b6_bytes=t_raw)
+        source_path=self.root/'artifacts'/'forward-paper'/'live-0a-001'
+        ledger=PaperLedger(directory,cap.binding,cap.rules,SourceAdapter(source_path,cap.source),
+            CandleSource(source_path,cap.source),verified_source=verified_source,authorization=cap,
+            invocation_reuse=True,checkpoints=(t['checkpoint'],p['checkpoint']))
+        try:cap.guard()
+        except BaseException:
+            ledger.close();raise
+        return cap,ledger
+
+
+def prepare_execution(run_id,root=None):
+    from paper.operations import ROOT
+    root=Path(ROOT if root is None else root).resolve()
+    v,t,p,a_raw,t_raw,raw=_read_successor(run_id,root)
+    return _issue(ExecutionPlan,root=root,run_id=run_id,payload=encoded(v),
+                  ancestry=(a_raw,t_raw,raw),_used=False)
+
+
+def load_execution(run_id, root=None):
+    from paper.operations import ROOT
+    root=Path(ROOT if root is None else root).resolve()
+    v,t,p,a_raw,t_raw,raw=_read_successor(run_id,root)
+    state_at(run_id,root,v,checkpoints=(t['checkpoint'],p['checkpoint']))
     cap=_issue(ClockCapability,payload=encoded(v),root=root,envelope_bytes=raw,activation_bytes=a_raw,b6_bytes=t_raw)
     cap.guard();return cap
 
