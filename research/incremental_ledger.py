@@ -243,6 +243,15 @@ class SyntheticLedger:
                 self.reducer, self.authorization_id, self.policy):raise Blocked('State policy/identity drift')
         if value['schema'] != self._schema():raise Blocked('Schema/protection changed')
         tail = self.db.execute('SELECT sequence,digest FROM journal ORDER BY sequence DESC LIMIT 1').fetchone()
+        if tail is None:
+            # A verified genesis has no journal event yet. Do not confuse that
+            # state with truncation of an already advanced compact checkpoint.
+            identity=self.db.execute('SELECT * FROM identity').fetchall()
+            if (type(value['sequence']) is not int or value['sequence']!=0
+                    or value['state']['head']!=self.v.identity_id
+                    or identity!=[(1,self.v.identity_id,encoded(self.v.identity).decode())]):
+                raise Blocked('Journal tail mismatch')
+            tail=(0,self.v.identity_id)
         if tail != (value['sequence'], value['state']['head']):raise Blocked('Journal tail mismatch')
         return value
 

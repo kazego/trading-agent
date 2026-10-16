@@ -117,7 +117,14 @@ class ClockCapability(Authorization):
 
     def guard(self):
         if self._seal is not _SEAL:raise ValueError('Unissued capability')
-        run=self.record['run_id'];v,t,current,a_raw,t_raw=chain(run,self.root)
+        run=self.record['run_id']
+        if self.proposal['kind']==b.NEW_CYCLE:
+            from research.new_cycle_authorization import read_execution
+            v,t,p,a_raw,t_raw,raw=read_execution(run,self.root)
+            if encoded(v)!=self.payload or (raw,a_raw,t_raw)!=(self.envelope_bytes,self.activation_bytes,self.b6_bytes):
+                raise ValueError('Bound new-cycle bytes changed')
+            return
+        v,t,current,a_raw,t_raw=chain(run,self.root)
         _,path=b.locations(run,self.root,b.SUCCESSOR)
         value,raw=b.read(path)
         if raw!=self.envelope_bytes or a_raw!=self.activation_bytes or t_raw!=self.b6_bytes:
@@ -129,11 +136,15 @@ class ClockCapability(Authorization):
         self.guard()
         if binding!=self.binding or accepted_ms<self.proposal['effective_ms']:
             raise ValueError('Wrong run/binding or premature clock acceptance')
+        if self.proposal['kind']==b.NEW_CYCLE and boundary_ms<=self.record['t0_ms']:
+            raise ValueError('Signals at or before new-cycle T0 forbidden')
         # Earlier aligned boundaries can only be recorded as expired, never executable.
         if boundary_ms<self.proposal['effective_ms'] and accepted_ms<=boundary_ms+840000:
             raise ValueError('Pre-successor boundary cannot become executable')
 
     def accept(self,ledger,boundary):
+        if self.proposal['kind']==b.NEW_CYCLE and boundary<=self.record['t0_ms']:
+            raise ValueError('Signals at or before new-cycle T0 forbidden')
         return ledger.accept_v3(boundary,authorization=self)
 
 
@@ -145,6 +156,10 @@ def _issue(cls,**fields):
 
 
 def _read_successor(run_id, root):
+    _,new_path=b.locations(run_id,root,b.NEW_CYCLE)
+    if new_path.exists():
+        from research.new_cycle_authorization import read_execution
+        return read_execution(run_id,root)
     v,t,current,a_raw,t_raw=chain(run_id,root)
     _,path=b.locations(run_id,root,b.SUCCESSOR);e,raw=b.read(path)
     p=b.historical(e);verify_successor(p,v,t,current)
@@ -172,23 +187,41 @@ class ExecutionPlan:
     @property
     def source(self):return source_from(self.record['source'])
 
-    def open(self,verified_source):
+    def open(self,verified_source, *, backend='traditional', incremental_owner=None):
+        # Explicit closed configuration; never infer a backend from environment,
+        # artifacts or caller-provided implementation classes.
+        if type(backend) is not str or backend not in ('traditional','incremental'):
+            raise ValueError('Unknown ledger backend')
+        if backend=='traditional' and incremental_owner is not None:
+            raise ValueError('Traditional backend does not accept an incremental owner')
         from paper.ledger import PaperLedger
         from paper.source import SourceAdapter
         from paper.market import CandleSource
         if self._seal is not _SEAL or self._used:raise ValueError('Invalid or consumed execution plan')
+        if backend=='incremental':
+            from research.incremental_full_consumer import validate_incremental_owner
+            # Operational ownership/migration is not implemented. Reject it
+            # BEFORE reading a ledger or issuing an execution capability.
+            validate_incremental_owner(incremental_owner,self.root)
         object.__setattr__(self,'_used',True)
         v,t,p,a_raw,t_raw,raw=_read_successor(self.run_id,self.root)
         if encoded(v)!=self.payload or (a_raw,t_raw,raw)!=self.ancestry:
             raise ValueError('Authorization changed before ledger verification')
+        if p.get('kind')==b.NEW_CYCLE and backend!='incremental':
+            raise ValueError('New-cycle execution requires explicit incremental backend')
         _,directory=paths(self.run_id,self.root)
         if not (directory/'paper.sqlite').is_file():raise ValueError('Invocation requires existing authorized ledger')
         cap=_issue(ClockCapability,payload=encoded(v),root=self.root,envelope_bytes=raw,
                    activation_bytes=a_raw,b6_bytes=t_raw)
         source_path=self.root/'artifacts'/'forward-paper'/'live-0a-001'
-        ledger=PaperLedger(directory,cap.binding,cap.rules,SourceAdapter(source_path,cap.source),
+        factory=PaperLedger;extra={}
+        if backend=='incremental':
+            from research.incremental_full_consumer import IncrementalConsumerLedger
+            factory=IncrementalConsumerLedger
+            extra=dict(synthetic_owner=incremental_owner,initialize=False)
+        ledger=factory(directory,cap.binding,cap.rules,SourceAdapter(source_path,cap.source),
             CandleSource(source_path,cap.source),verified_source=verified_source,authorization=cap,
-            invocation_reuse=True,checkpoints=(t['checkpoint'],p['checkpoint']))
+            invocation_reuse=True,checkpoints=(t['checkpoint'],p['checkpoint']),**extra)
         try:cap.guard()
         except BaseException:
             ledger.close();raise

@@ -13,6 +13,7 @@ def main(argv=None):
     parser.add_argument('command',choices=('consume','verify','activate','status','latest','trades','missed','summary'))
     parser.add_argument('--run-id',required=True)
     parser.add_argument('--reviewed-manifest')
+    parser.add_argument('--backend',choices=('traditional','incremental'),default='traditional')
     args=parser.parse_args(argv)
     if args.command=='activate':
         if not args.reviewed_manifest: parser.error('Explicit reviewed manifest required')
@@ -22,7 +23,7 @@ def main(argv=None):
         result=dict(label=LABEL,activation=auth.id)
     elif args.command=='verify':
         result=dict(label=LABEL,activation=load(args.run_id).id)
-    elif args.command=='consume': result=consume(args.run_id)
+    elif args.command=='consume': result=consume(args.run_id,backend=args.backend)
     else: result=report(args.run_id,args.command,now_ms=utc_ms())
     print(encoded(result).decode())
 

@@ -82,6 +82,11 @@ class PaperLedger:
                 raise ValueError('Explicit verified transition authorization required')
             authorization.guard()
             if type(authorization) is ClockCapability:
+                from paper.binding import NEW_CYCLE
+                if authorization.proposal['kind']==NEW_CYCLE:
+                    from research.incremental_full_consumer import IncrementalConsumerLedger
+                    if type(self) is not IncrementalConsumerLedger:
+                        raise ValueError('New-cycle capability requires incremental ledger')
                 from paper.operations import paths
                 expected_directory=paths(authorization.record['run_id'],authorization.root)[1]
                 if Path(directory).absolute()!=expected_directory:

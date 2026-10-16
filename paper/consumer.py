@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from paper.operations import ROOT, paths, exclusive, policy
-from paper.model import LABEL
+from paper.model import LABEL, parse
 from paper.source import SourceAdapter
 from paper.market import CandleSource
 from paper.ledger import PaperLedger
@@ -90,7 +90,9 @@ def _drain_position(ledger, verified, progress, state, before, *, clock, budget,
     return state,budget()
 
 
-def consume(run_id, *, root=ROOT, clock=utc_ms):
+def consume(run_id, *, root=ROOT, clock=utc_ms, backend='traditional'):
+    if type(backend) is not str or backend not in ('traditional','incremental'):
+        raise ValueError('Unknown ledger backend')
     start_mono=time.monotonic()  # Budget includes authorization and source verification.
     timings=StageTimings(start_mono)
     # Missing authorization must not create even an empty operational directory.
@@ -102,13 +104,26 @@ def consume(run_id, *, root=ROOT, clock=utc_ms):
         path=control/filename
         if path.is_symlink() or path.exists() and path.stat().st_nlink!=1:
             raise ValueError('Aliased operational file forbidden')
+    from paper.operations import consumer_exclusion
+    global_lock=consumer_exclusion(root)
+    global_lock.acquire()
     lock=DatabaseLock(control/'consumer')
-    lock.acquire()  # Overlap refusal must not latch BLOCKED on the legitimate owner.
-    db=None; ledger=None; invocation=None
+    try:lock.acquire()
+    except BaseException:
+        global_lock.release();raise
+    # Overlap refusal must not latch BLOCKED on the legitimate owner.
+    db=None; ledger=None; invocation=None; incremental_owner=None
     try:
         if (control/'BLOCKED.json').exists(): raise ValueError('Consumer is BLOCKED')
         with timings.measure('authorization_before_started_ms'):
             auth=prepare_execution(run_id,root)
+            if backend=='incremental':
+                from paper import binding as binding_records
+                from research.new_cycle_authorization import ExecutionOwnership
+                envelope=parse(auth.ancestry[-1][:-1])
+                if binding_records.historical(envelope)['kind']!=binding_records.NEW_CYCLE:
+                    raise ValueError('Incremental consumer requires a new-cycle binding')
+                incremental_owner=ExecutionOwnership(run_id,root,global_lock)
         started=clock()
         if started<auth.record['t0_ms']:
             return dict(label=LABEL,state='WAITING_FOR_T0')
@@ -142,7 +157,8 @@ def consume(run_id, *, root=ROOT, clock=utc_ms):
             if item.boundary_ms!=expected: raise ValueError('Missing prospective source boundary')
             expected+=14400000
         with timings.measure('ledger_open_and_reconcile'):
-            auth,ledger=auth.open(verified)
+            if backend=='traditional':auth,ledger=auth.open(verified)
+            else:auth,ledger=auth.open(verified,backend=backend,incremental_owner=incremental_owner)
         with timings.measure('initial_reconcile'):
             state=ledger.reconcile()
         with timings.measure('ledger_source_check'):
@@ -207,6 +223,14 @@ def consume(run_id, *, root=ROOT, clock=utc_ms):
             db.execute("UPDATE invocations SET state='BLOCKED' WHERE sequence=?",(invocation,)); db.commit()
         raise
     finally:
-        if ledger is not None: ledger.close()
-        if db is not None: db.close()
-        lock.release()
+        try:
+            if ledger is not None: ledger.close()
+        finally:
+            try:
+                if db is not None: db.close()
+            finally:
+                try:
+                    if incremental_owner is not None:incremental_owner.close()
+                finally:
+                    lock.release()
+                    global_lock.release()

@@ -26,10 +26,12 @@ def policy():
 
 
 def implementation():
+    # Code identity follows the installed module, never the data/deployment root.
+    code_root=Path(__file__).resolve().parents[1]
     paths=('paper/operations.py','paper/consumer.py','paper/readout.py','paper/__main__.py',
            'scripts/live0b-task.ps1','paper/git_batch.py','paper/verified_source.py','paper/transition.py','paper/binding.py','paper/authorization.py','paper_admin.py')
     return fingerprint(dict(version='paper-b5-implementation-v1', b4=b4(), policy=policy(),
-        sources={p:hashlib.sha256((ROOT/p).read_text(encoding='utf-8').encode()).hexdigest() for p in paths}))
+        sources={p:hashlib.sha256((code_root/p).read_text(encoding='utf-8').encode()).hexdigest() for p in paths}))
 
 
 def rules_from(value):
@@ -122,7 +124,7 @@ def load(run_id, root=ROOT):
         raise ValueError('Malformed activation envelope')
     if fingerprint(envelope['authorization'])!=envelope['authorization_fingerprint']:
         raise ValueError('Activation fingerprint mismatch')
-    if (control/'authorizations'/'clock-v3-successor-v1.json').exists():
+    if any((control/'authorizations'/name).exists() for name in ('clock-v3-successor-v1.json','new-paper-cycle-execution-v1.json')):
         from paper.authorization import load_execution
         return load_execution(run_id,root)
     if (control/'transition-b6-v1.json').exists():
@@ -152,3 +154,21 @@ def activate(auth, *, now_ms, root=ROOT, clock=None):
         raise ValueError('T0 expired during source verification')
     control.mkdir(parents=True)
     exclusive(control/'activation.json',dict(authorization=auth.record,authorization_fingerprint=auth.id))
+
+
+def consumer_exclusion(root):
+    """One consumer across all cycle IDs in a deployment root; OS-owned lease.
+
+    Advisory, like existing database locks: every supported consumer uses it.
+    Does not defend against an administrator bypassing the reviewed program.
+    """
+    from paper.binding import safe
+    from runtime import DatabaseLock
+    root=Path(root).resolve()
+    from research.incremental_durable import AUTHORIZED
+    # Separate synthetic roots still share one exclusion domain. Production
+    # cycle IDs share their deployment's artifacts directory.
+    domain=root.parent if root.parent==AUTHORIZED else root/'artifacts'
+    lock=DatabaseLock(safe(domain/'paper-consumer-exclusive'))
+    safe(lock.path)
+    return lock

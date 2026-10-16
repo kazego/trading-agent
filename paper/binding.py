@@ -7,6 +7,7 @@ from research.spec import encoded, fingerprint
 
 SUCCESSOR = 'clock-v3-successor-v1'
 ABANDONMENT = 'clock-abandonment-v1'
+NEW_CYCLE = 'new-paper-cycle-execution-v1'
 OLD_B3 = 'ae8493a638ee9017df9641a12bbe910fd1d0cde0572ff907df99e1c2cb056d94'
 ROOT_B4 = '217d636cc701b0b88ce6f06dac4b27a4ff7380d37827a0efdc33132206a3da32'
 ROOT_B5 = '3e16cfc0fb14a9a2710b80d9ba00e3669875943cb206d0d112e12301280c3a31'
@@ -15,6 +16,11 @@ B6_B5 = 'c27c64c7ff65b70e7493009f902fa1d62e02f4183af4e292e1b817804c48efc5'
 
 
 def schema(kind):
+    if kind==NEW_CYCLE:
+        return dict(version=kind,fields=sorted(['kind','label','schema','run_id','activation',
+            'implementations','effective_ms','clock','checkpoint','unchanged','backend',
+            'ledger','modules','initial_state','continuity']),authority='CANONICAL_BOUND_STORE_ONLY',
+            replay='RECORDED_VERSION_NO_CURRENT_CAPABILITY',operation='NEW_PAPER_INCREMENTAL_ONLY')
     common = ['kind','label','schema','run_id','activation','b6','implementations']
     fields = common + (['effective_ms','clock','checkpoint','unchanged','previous_implementations']
         if kind == SUCCESSOR else ['successor','authorization','operation','constraints'])
@@ -34,8 +40,11 @@ def validate(proposal):
     kind=proposal['kind']; spec=schema(kind)
     if set(proposal)!=set(spec['fields']) or proposal['label']!=LABEL or proposal['schema']!=fingerprint(spec):
         raise ValueError('Malformed proposal schema')
-    for field in ('activation','b6'):digest(proposal[field])
-    if kind==SUCCESSOR:
+    for field in (('activation',) if kind==NEW_CYCLE else ('activation','b6')):digest(proposal[field])
+    if kind==NEW_CYCLE:
+        if proposal['backend']!='incremental':raise ValueError('Incremental backend required')
+        for field in ('modules','initial_state'):digest(proposal[field])
+    if kind in (SUCCESSOR,NEW_CYCLE):
         if timestamp(proposal['effective_ms'])%14400000: raise ValueError('Aligned successor required')
         from paper.clock_v3 import ClockAuthorization
         c=proposal['clock'];ClockAuthorization(encoded(c),fingerprint(c))
@@ -64,7 +73,7 @@ def historical(envelope):
             or fingerprint(validate(envelope['proposal']))!=envelope['reviewed_fingerprint']):
         raise ValueError('Malformed historical approval record')
     stamp=timestamp(envelope['bound_ms']); p=envelope['proposal']
-    if p['kind']==SUCCESSOR and stamp>=p['effective_ms']: raise ValueError('Late historical binding')
+    if p['kind'] in (SUCCESSOR,NEW_CYCLE) and stamp>=p['effective_ms']: raise ValueError('Late historical binding')
     if p['kind']==ABANDONMENT and stamp<p['authorization']['resolved_ms']:
         raise ValueError('Binding precedes resolution timestamp')
     return p  # Plain data, never a runtime capability.
@@ -90,7 +99,7 @@ def locations(run_id, root, kind, *, reviewed=None, owner=None):
     if reviewed is not None:
         digest(reviewed)
         proposal=safe(Path(root).resolve()/'artifacts'/'forward-paper-review'/run_id/kind/(reviewed+'.proposal.json'))
-    if kind==SUCCESSOR: target=control/'authorizations'/(SUCCESSOR+'.json')
+    if kind in (SUCCESSOR,NEW_CYCLE): target=control/'authorizations'/(kind+'.json')
     else: target=control/'authorizations'/'abandonments'/(digest(owner)+'.json')
     return proposal,safe(target)
 

@@ -20,6 +20,7 @@ from paper import consumer, authorization, ledger as ledger_module
 from paper.ledger import PaperLedger
 from paper.operations import paths
 from forward import operations as forward_operations
+from research.incremental_ledger import SyntheticLedger
 
 
 def accepting_fixture(root):
@@ -68,10 +69,26 @@ class FullConsumerTests(unittest.TestCase):
             owner=Ownership(root)
             instances=[];normal_replays=[]
             original_verify=PaperLedger._verify
+            original_load=SyntheticLedger._load
+            def diagnosed_load(core):
+                # Read on the same connection/transaction, immediately before
+                # validation. Diagnostics never replace or suppress that check.
+                tail=core.db.execute('SELECT sequence,digest FROM journal ORDER BY sequence DESC LIMIT 1').fetchone()
+                rows=core.db.execute('SELECT payload FROM incremental_state').fetchall()
+                try:
+                    compact=json.loads(rows[0][0]) if len(rows)==1 else {}
+                    evidence=dict(journal_tail=tail,compact_sequence=compact.get('sequence'),
+                        compact_head=compact.get('state',{}).get('head'),
+                        genesis=core.v.identity_id,in_transaction=core.db.in_transaction)
+                except Exception:evidence=dict(journal_tail=tail,compact_rows=len(rows))
+                try:return original_load(core)
+                except Exception:
+                    print('LOAD_FAILURE '+json.dumps(evidence),flush=True)
+                    raise
             class Selected(IncrementalConsumerLedger):
                 def __init__(self,*args,**kwargs):
                     self.ready=False
-                    super().__init__(*args,synthetic_owner=owner,**kwargs)
+                    super().__init__(*args,synthetic_owner=owner,initialize=True,**kwargs)
                     self.ready=True;instances.append(self)
             def verify(obj,*args,**kwargs):
                 if isinstance(obj,Selected) and obj.ready:
@@ -90,6 +107,7 @@ class FullConsumerTests(unittest.TestCase):
                     if incremental:
                         stack.enter_context(patch.object(ledger_module,'PaperLedger',Selected))
                         stack.enter_context(patch.object(PaperLedger,'_verify',verify))
+                        stack.enter_context(patch.object(SyntheticLedger,'_load',diagnosed_load))
                     start=time.monotonic()
                     result=consumer.consume(RUN,root=root,clock=lambda:meta['now'])
                     elapsed=time.monotonic()-start

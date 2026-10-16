@@ -169,9 +169,9 @@ class Replay:
                 confirmation = AcceptanceStore._confirmation(r['reservation'], data['durable_ms'], data['elapsed_ns'])
             else:
                 from paper.clock_v3 import confirmation as confirm_v3, ClockAuthorization
-                from paper.binding import historical, SUCCESSOR
+                from paper.binding import historical, SUCCESSOR, NEW_CYCLE
                 grant=historical(data['binding_evidence'])
-                if grant['kind']!=SUCCESSOR or grant['clock']!=data['authorization']:
+                if grant['kind'] not in (SUCCESSOR,NEW_CYCLE) or grant['clock']!=data['authorization']:
                     raise ValueError('Historical clock binding mismatch')
                 auth = ClockAuthorization(encoded(data['authorization']),data['approval'])
                 auth.check(self.binding,r['reservation']['acceptance_ms'])
